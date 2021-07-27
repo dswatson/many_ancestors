@@ -76,7 +76,7 @@ sim_dat <- function(n, d_z, rho, snr, xzr) {
   return(out)
 }
 
-# Draw lots of W's
+# Ricardo's version: w := sum(sign(abs(coef0) - abs(coef1)))
 w_fn <- function(b, n, d_z, rho, snr, xzr) {
   df <- sim_dat(n, d_z, rho, snr, xzr)
   f0 <- cv.glmnet(x = df$z, y = df$h0$y)
@@ -97,23 +97,48 @@ w_fn <- function(b, n, d_z, rho, snr, xzr) {
 res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
   w_fn(i, n = 1000, d_z = 100, rho = 0, snr = 5, xzr = 1)
 
-# Wrong direction
+# Alternatively: w := ||beta_z0|| - ||beta_z1||
 w_fn <- function(b, n, d_z, rho, snr, xzr) {
+  # Simulate data (with fixed weights)
   df <- sim_dat(n, d_z, rho, snr, xzr)
-  f0 <- cv.glmnet(x = df$z, y = df$h1$x)
-  f1 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$y)),
+  ### H0: X \indep Y | Z ###
+  f0 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h0$x[sample.int(n)])),
+                  y = df$h0$y)
+  f1 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h0$x)),
+                  y = df$h0$y)
+  f2 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h0$y[sample.int(n)])), 
+                  y = df$h0$x)
+  f3 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h0$y)),
+                  y = df$h0$x)
+  v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
+  v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
+  v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
+  v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  w0 <- v0 - v1
+  w1 <- v2 - v3
+  s_null <- w0 - w1
+  ### H1: X \dep Y | Z ###
+  f0 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$x[sample.int(n)])), 
+                  y = df$h1$y)
+  f1 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$x)),
+                  y = df$h1$y)
+  f2 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$y[sample.int(n)])), 
                   y = df$h1$x)
-  v0 <- abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ])
-  v1 <- abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ])
-  w1 <- sum(sign(v0 - v1))
-  return(w1)
+  f3 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$y)),
+                  y = df$h1$x)
+  v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
+  v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
+  v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
+  v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  w0 <- v0 - v1
+  w1 <- v2 - v3
+  s_alt <- w0 - w1
+  # Export
+  out <- data.table('s_null' = s_null, 's_alt' = s_alt)
+  return(out)
 }
-res2 <- foreach(i = seq_len(2000), .combine = c) %dopar% 
-  w_fn(i, n = 1000, d_z = 100, rho = 0, snr = 5, xzr = 1)
-
-
-
-
+res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
+  w_fn(i, n = 1000, d_z = 100, rho = 0.25, snr = 5, xzr = 1)
 
 
 # Variance about zero is a function of rho! (At least holding all else constant)
