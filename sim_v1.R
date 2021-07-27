@@ -98,7 +98,7 @@ res <- foreach(i = seq_len(2000), .combine = rbind) %dopar%
   w_fn(i, n = 1000, d_z = 100, rho = 0, snr = 5, xzr = 1)
 
 # Alternatively: w := ||beta_z0|| - ||beta_z1||
-w_fn <- function(b, n, d_z, rho, snr, xzr) {
+w_fn <- function(b, n, d_z, rho, snr, xzr, l) {
   # Simulate data (with fixed weights)
   df <- sim_dat(n, d_z, rho, snr, xzr)
   ### H0: X \indep Y | Z ###
@@ -110,10 +110,17 @@ w_fn <- function(b, n, d_z, rho, snr, xzr) {
                   y = df$h0$x)
   f3 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h0$y)),
                   y = df$h0$x)
-  v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
-  v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
-  v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
-  v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  if (l == 1) {
+    v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
+    v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
+    v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
+    v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  } else if (l == 0) {
+    v0 <- sum(coef(f0, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v1 <- sum(coef(f1, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v2 <- sum(coef(f2, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v3 <- sum(coef(f3, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+  }
   w0 <- v0 - v1
   w1 <- v2 - v3
   s_null <- w0 - w1
@@ -126,10 +133,17 @@ w_fn <- function(b, n, d_z, rho, snr, xzr) {
                   y = df$h1$x)
   f3 <- cv.glmnet(x = as.matrix(cbind(df$z, df$h1$y)),
                   y = df$h1$x)
-  v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
-  v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
-  v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
-  v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  if (l == 1) {
+    v0 <- sum(abs(coef(f0, s = 'lambda.min')[2:(d_z + 1), ]))
+    v1 <- sum(abs(coef(f1, s = 'lambda.min')[2:(d_z + 1), ]))
+    v2 <- sum(abs(coef(f2, s = 'lambda.min')[2:(d_z + 1), ]))
+    v3 <- sum(abs(coef(f3, s = 'lambda.min')[2:(d_z + 1), ]))
+  } else if (l == 0) {
+    v0 <- sum(coef(f0, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v1 <- sum(coef(f1, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v2 <- sum(coef(f2, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+    v3 <- sum(coef(f3, s = 'lambda.min')[2:(d_z + 1), ] == 0)
+  }
   w0 <- v0 - v1
   w1 <- v2 - v3
   s_alt <- w0 - w1
@@ -138,7 +152,7 @@ w_fn <- function(b, n, d_z, rho, snr, xzr) {
   return(out)
 }
 res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
-  w_fn(i, n = 1000, d_z = 100, rho = 0.25, snr = 5, xzr = 1)
+  w_fn(i, n = 1000, d_z = 100, rho = 0.1, snr = 5, xzr = 1, l = 0)
 
 
 # Variance about zero is a function of rho! (At least holding all else constant)
