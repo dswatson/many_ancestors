@@ -3,6 +3,7 @@
 # Load libraries, register cores
 library(data.table)
 library(glmnet)
+library(randomForest)
 library(tidyverse)
 library(doMC)
 registerDoMC(8)
@@ -98,7 +99,7 @@ res <- foreach(i = seq_len(2000), .combine = rbind) %dopar%
   w_fn(i, n = 1000, d_z = 100, rho = 0, snr = 5, xzr = 1)
 
 # Alternatively: w := ||beta_z0|| - ||beta_z1||
-w_fn <- function(b, n, d_z, rho, snr, xzr, l) {
+eval_fn <- function(b, n, d_z, rho, snr, xzr, l) {
   # Simulate data (with fixed weights)
   df <- sim_dat(n, d_z, rho, snr, xzr)
   ### H0: X \indep Y | Z ###
@@ -152,7 +153,7 @@ w_fn <- function(b, n, d_z, rho, snr, xzr, l) {
   return(out)
 }
 res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
-  w_fn(i, n = 1000, d_z = 100, rho = 0.1, snr = 5, xzr = 1, l = 0)
+  eval_fn(i, n = 1000, d_z = 100, rho = 0.1, snr = 5, xzr = 1, l = 0)
 
 
 # Variance about zero is a function of rho! (At least holding all else constant)
@@ -164,8 +165,100 @@ res <- foreach(i = seq_len(2000), .combine = rbind) %dopar%
 
 
 
+# Benchmarking against (i) simple Gaussian scores and (ii) Lasso coef counts
+# First up, partial correlation test
+f0 <- cv.glmnet(x = df$z, y = df$h0$x)
+f1 <- cv.glmnet(x = df$z, y = df$h0$y)
+x_hat <- predict(f0, newx = df$z, s = 'lambda.min')
+y_hat <- predict(f1, newx = df$z, s = 'lambda.min')
+eps_x <- df$h0$x - x_hat
+eps_y <- df$h0$y - y_hat
+cor.test(eps_x, eps_y)
+
+# If Y <- Z -> X, then p(x,y|z) factorizes as p(x|z)p(y|z)
+# If Z -> X -> Y <- Z, then p(x,y|z) factorizes as p(x|z)p(y|x,z)
+# If Z -> Y -> X <- Z, then p(x,y|z) factorizes as p(y|z)p(x|y,z)
 
 
+k <- sum(coef(f0, s = 'lambda.min') != 0)
+y_hat <- predict(f0, newx = df$z, s = 'lambda.min')
+eps_y <- df$h0$y - y_hat
+rmse <- sqrt(mean(eps_y^2))
+bic <- -2 * sum(dnorm(eps_y, sd = rmse, log = TRUE)) + k * log(n)
+
+
+bic <- n * log(mean(eps^2)) + k * log(n)
+
+
+
+
+
+
+### Scoring
+bic_fn <- function(input, output) {
+  f <- cv.glmnet(x = input, y = output)
+  k <- sum(coef(f, s = 'lambda.min') != 0)
+  y_hat <- predict(f, newx = input, s = 'lambda.min')
+  eps <- output - y_hat
+  mse <- mean(eps^2)
+  n <- length(output)
+  bic <- n * log(mse) + k * log(n)
+  return(bic)
+}
+bic_x0 <- bic_fn(input = df$z, output = df$h0$x)
+bic_y0 <- bic_fn(input = df$z, output = df$h0$y)
+bic_x1 <- bic_fn(input = as.matrix(cbind(df$z, df$h0$y)), output = df$h0$x)
+bic_y1 <- bic_fn(input = as.matrix(cbind(df$z, df$h0$x)), output = df$h0$y)
+bic_h0 <- bic_x0 + bic_y0
+bic_x_to_y <- bic_x0 + bic_y1
+bic_y_to_x <- bic_x1 + bic_y0
+
+
+
+
+
+# Random forest version
+eval_fn <- function(b, n, d_z, rho, snr, xzr) {
+  # Simulate data (with fixed weights)
+  df <- sim_dat(n, d_z, rho, snr, xzr)
+  ### H0: X \indep Y | Z ###
+  f0 <- randomForest(x = as.matrix(cbind(df$z, df$h0$x[sample.int(n)])),
+                     y = df$h0$y, ntree = 100)
+  f1 <- randomForest(x = as.matrix(cbind(df$z, df$h0$x)),
+                     y = df$h0$y, ntree = 100)
+  f2 <- randomForest(x = as.matrix(cbind(df$z, df$h0$y[sample.int(n)])), 
+                     y = df$h0$x, ntree = 100)
+  f3 <- randomForest(x = as.matrix(cbind(df$z, df$h0$y)),
+                     y = df$h0$x, ntree = 100)
+  v0 <- sum(importance(f0)[seq_len(d_z), ])
+  v1 <- sum(importance(f1)[seq_len(d_z), ])
+  v2 <- sum(importance(f2)[seq_len(d_z), ])
+  v3 <- sum(importance(f3)[seq_len(d_z), ])
+  w0 <- v0 - v1
+  w1 <- v2 - v3
+  s_null <- w0 - w1
+  ### H1: X \dep Y | Z ###
+  f0 <- randomForest(x = as.matrix(cbind(df$z, df$h1$x[sample.int(n)])),
+                     y = df$h1$y, ntree = 100)
+  f1 <- randomForest(x = as.matrix(cbind(df$z, df$h1$x)),
+                     y = df$h1$y, ntree = 100)
+  f2 <- randomForest(x = as.matrix(cbind(df$z, df$h1$y[sample.int(n)])), 
+                     y = df$h1$x, ntree = 100)
+  f3 <- randomForest(x = as.matrix(cbind(df$z, df$h1$y)),
+                     y = df$h1$x, ntree = 100)
+  v0 <- sum(importance(f0)[seq_len(d_z), ])
+  v1 <- sum(importance(f1)[seq_len(d_z), ])
+  v2 <- sum(importance(f2)[seq_len(d_z), ])
+  v3 <- sum(importance(f3)[seq_len(d_z), ])
+  w0 <- v0 - v1
+  w1 <- v2 - v3
+  s_alt <- w0 - w1
+  # Export
+  out <- data.table('s_null' = s_null, 's_alt' = s_alt)
+  return(out)
+}
+res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
+  eval_fn(i, n = 1000, d_z = 100, rho = 0.1, snr = 5, xzr = 1)
 
 
 
