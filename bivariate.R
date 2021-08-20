@@ -4,7 +4,9 @@
 library(data.table)
 library(glmnet)
 library(bestsubset)
+library(randomForest)
 library(tidyverse)
+library(ggsci)
 library(doMC)
 registerDoMC(8)
 
@@ -78,12 +80,12 @@ beta_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
     y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
     mse <- colMeans((y_hat - tst_y)^2)
-    beta <- as.numeric(coef(fit, s = fit$lambda[which.min(mse)]))
+    beta <- as.numeric(coef(fit, s = fit$lambda[which.min(mse)]))[1:d_z]
   } else if (f == 'step') {
     fit <- fs(trn_x, trn_y, intercept = FALSE, verbose = FALSE)
     y_hat <- predict(fit, newx = tst_x)
     mse <- colMeans((y_hat - tst_y)^2)
-    beta <- coef(fit)[, which.min(mse)]
+    beta <- coef(fit)[1:d_z, which.min(mse)]
   }
   return(beta)
 }
@@ -110,7 +112,7 @@ test_fn <- function(b, n, d_z, rho, k, snr, xzr, l) {
   zx <- cbind(z, x)
   # Compute coefficients
   fit_fn <- function(h, f) {
-    if (h == 0) y <- dat$y0 else y <- dat$y1
+    if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
     betas <- list(
       beta_fn(z[trn, ], y[trn], z[tst, ], y[tst], f),
@@ -144,24 +146,24 @@ test_fn <- function(b, n, d_z, rho, k, snr, xzr, l) {
     # Export
     return(out)
   }
-  out <- foreach(a = c(0, 1), .combine = rbind) %:%
+  out <- foreach(a = c('h0', 'h1'), .combine = rbind) %:%
     foreach(b = c('lasso', 'step'), .combine = rbind) %do% fit_fn(h = a, f = b)
   return(out)
 }
-res <- foreach(i = seq_len(100), .combine = rbind) %dopar% 
-  test_fn(i, n = 200, d_z = 50, rho = 0.3, k = 25, snr = 5, xzr = 1, l = 0)
+res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
+  test_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, l = 2)
 
 #Plot
 res %>%
   pivot_longer(cols = c(entner, ours), 
                names_to = 'method', values_to = 'value') %>%
   ggplot(aes(value, fill = method)) +
-  geom_histogram(bins = 40, alpha = 0.75) + 
+  geom_histogram(bins = 50, alpha = 0.75) + 
   scale_fill_npg() + 
   theme_bw() +
   facet_grid(h ~ f, scales = 'free') 
 
-# Benchmark against naive solutions: complete discovery and ignoring Z
+# Add nonlinear simulations, RFE with random forest, etc.
 
 
 
