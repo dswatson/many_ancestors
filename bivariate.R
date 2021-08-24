@@ -213,7 +213,7 @@ x_strength <- c(0.5, 1, 2)
 
 
 
-# To implement Entner's method with GCM test
+# To implement Entner's method with GCM or LOCO test
 eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
@@ -235,20 +235,28 @@ eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
       return(y_hat)
     })
   }
-  res_mat <- y_hat - tst_y
-  mse <- colMeans(res_mat^2)
+  eps_mat <- y_hat - tst_y
+  mse <- colMeans(eps_mat^2)
   eps <- res_mat[, which.min(mse)]
   return(eps)
 }
 gcm_test <- function(x, y) {
-  n <- length(x)
+  nn <- length(x)
   R <- x * y
   R.sq <- R^2
   meanR <- mean(R)
-  z <- sqrt(n) * meanR / sqrt(mean(R.sq) - meanR^2)
+  z <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
   p.value <- 2 * pnorm(abs(z), lower.tail = FALSE)
   return(p.value)
 }
+loco_test <- function(x, y, z) {
+  eps_x <- eps_fn(z, y)
+  eps_y <- eps_fn(cbind(x, z), y)
+  delta <- abs(eps_x) - abs(eps_y)
+  p.value <- wilcox.test(delta, alt = 'greater')$p.value
+  return(p.value)
+}
+
 
 
 f_x <- lm(x ~ z)
