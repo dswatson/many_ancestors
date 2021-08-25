@@ -242,14 +242,14 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
 
 # Entner
 entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
-  # Split training and validation sets
-  trn <- sample(n, round(0.8 * n))
-  tst <- seq_len(n)[-trn]
   # Simulate data
   dat <- sim_dat(n, d_z, rho, k, snr, xzr, form)
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   zx <- cbind(z, x)
+  # Split training and validation sets
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   # Fit models
   fit_fn <- function(h, f) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
@@ -260,22 +260,23 @@ entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
     # Evaluate rules
     delta <- abs(f0$eps) - abs(f1$eps)
     loco_p <- wilcox.test(delta, alt = 'greater')$p.value
-    r1 <- f0$beta != 0 && f1$beta == 0
-    r2 <- loco_p <= alpha || (f2$beta != 0 && f0$beta == 0)
+    r1 <- f0$beta != 0 & f1$beta == 0
+    r2 <- loco_p <= alpha | (f2$beta != 0 & f0$beta == 0)
     # Export results
-    out <- data.table('h' = h, 'f' = f, 'r1' = r1, 'r2' = r2)
+    out <- data.table('b' = b, 'h' = h, 'f' = f, 'r1' = r1, 'r2' = r2)
     return(out)
   }
-  out <- foreach(a = c('h0', 'h1'), .combine = rbind) %:%
-    foreach(b = c('lasso', 'step'), .combine = rbind) %do% 
-    fit_fn(a, b)
+  out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %:%
+    foreach(bb = c('lasso', 'step'), .combine = rbind) %do% 
+    fit_fn(aa, bb)
   return(out)
 }
-res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
-  entner_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 2, xzr = 1, 
+res <- foreach(i = seq_len(200), .combine = rbind) %dopar% 
+  entner_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 5, xzr = 1, 
             form = 'linear', alpha = 0.05)
 
-n <- 500; d_z <- 50; rho <- 0.3; k <- 25; snr <- 2; xzr <- 1; form <- 'linear'; alpha <- 0.05
+n <- 500; d_z <- 50; rho <- 0.3; k <- 25; snr <- 5; xzr <- 1; 
+form <- 'linear'; alpha <- 0.05
 
 
 
