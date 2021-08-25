@@ -201,14 +201,20 @@ x_strength <- c(0.5, 1, 2)
 # Revised Entner: each Z gets treated as W once, 
 # see if anything satisfies R1 or R2
 
-# To implement Entner's method with GCM or LOCO test
-eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
+
+f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
     y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
+    eps_mat <- y_hat - tst_y
+    mse <- colMeans(eps_mat^2)
+    beta <- as.numeric(coef(fit, s = fit$lambda[which.min(mse)]))[1:d_z]
   } else if (f == 'step') {
     fit <- fs(trn_x, trn_y, intercept = FALSE, verbose = FALSE)
     y_hat <- predict(fit, newx = tst_x)
+    eps_mat <- y_hat - tst_y
+    mse <- colMeans(eps_mat^2)
+    beta <- coef(fit)[1:d_z, which.min(mse)]
   } else if (f == 'rf') {
     fit <- randomForest(trn_x, trn_y, ntree = 500)
     vimp <- data.frame('feature' = colnames(trn_x), 
@@ -216,99 +222,62 @@ eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
       arrange(desc(imp))
     # Consider 10 models, min d = 5, quadratic decay on dimensionality
     m <- unique(round(5 + ((d_z - 5) / 10^2) * seq_len(10)^2))
-    y_hat <- sapply(seq_along(m), function(i) {
+    eps_mat <- sapply(seq_along(m), function(i) {
       tmp_x <- trn_x[, vimp$feature[seq_len(m[i])]]
       tmp_f <- randomForest(tmp_x, trn_y, ntree = 200)
       y_hat <- predict(tmp_f, newdata = tst_x)
-      return(y_hat)
+      return(y_hat - tst_y)
     })
+    mse <- colMeans(eps_mat^2)
+    k_hat <- m[which.min(mse)]
+    beta <- double(length = d_z)
+    names(beta) <- paste0('z', seq_len(d_z))
+    keep <- vimp$feature[seq_len(k_hat)]
+    beta[keep] <- vimp$imp[seq_len(k_hat)]
   }
-  eps_mat <- y_hat - tst_y
-  mse <- colMeans(eps_mat^2)
   eps <- eps_mat[, which.min(mse)]
-  return(eps)
-}
-gcm_test <- function(x, y) {
-  nn <- length(x)
-  R <- x * y
-  R.sq <- R^2
-  meanR <- mean(R)
-  z <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
-  p.value <- 2 * pnorm(abs(z), lower.tail = FALSE)
-  return(p.value)
-}
-loco_test <- function(x, y, z) {
-  eps_f0 <- eps_fn(x_trn = x[trn, ], y_trn = y[trn],
-                   x_tst = x[tst, ], y_tst = y[tst], f)
-  eps_f1 <- eps_fn(x_trn = cbind(x[trn, ], z[trn]), y_trn = y[trn],
-                   x_tst = cbind(x[tst, ], z[tst]), y_tst = y[tst], f)
-  delta <- abs(eps_f0) - abs(eps_f1)
-  p.value <- wilcox.test(delta, alt = 'greater')$p.value
-  return(p.value)
-}
-
-
-# With GCM
-f_x <- lm(x ~ z)
-f_y <- lm(y ~ z)
-for (j in seq_len(d_z)) {
-  ### Rule 1 ###
-  # Rule 1(i)
-  f0_w <- lm(z[, j] ~ z[, -j])
-  f0_y <- lm(y ~ z[, -j])
-  p1.i <- gcm_test(residuals(f0_w), residuals(f0_y))
-  rule1.i <- ifelse(p1.i <= alpha, TRUE, FALSE)
-  # Rule 1(ii) ...Both must put nonzero weight on X tho?
-  f1_w <- lm(z[, j] ~ zx[, -j])
-  f1_y <- lm(y ~ zx[, -j])
-  p1.ii <- gcm_test(residuals(f1_w), residuals(f1_y))
-  rule1.ii <- ifelse(p1.ii <= alpha, FALSE, TRUE)
-  # Therefore
-  rule1 <- ifelse(rule1.i & rule1.ii, TRUE, FALSE)
-  ### Rule 2 ###
-  # Rule 2(i)
-  p2.i <- gcm_test(residuals(f_x), residuals(f_y))
-  rule2.i <- ifelse(p2.i <= alpha, FALSE, TRUE)
-  # Rule 2(ii)
-  f0_x <- lm(x ~ z[, -j])
-  p2.ii <- gcm_test(residuals(f0_w), residuals(f0_x))
-  rule2.ii <- ifelse(p2.ii <= alpha, TRUE, FALSE)
-  # Rule 2(iii)
-  rule2.iii <- !rule1.i
-  # Therefore
-  rule2 <- ifelse(rule2.i | (rule2.ii & rule2.iii), TRUE, FALSE)
-}
-
-
-p2.1 <- loco_test(x = z, y = y, z = x)
-# With LOCO
-ci_wrapper <- function(j) {
-  ### Rule 1 ###
-  # Rule 1(i)
-  p1.i <- loco_test(x = z[, -j], y = y, z = z[, j])
-  # Rule 1(ii) ...Both must put nonzero weight on X tho?
-  p1.ii <- loco_test(x = zx[, -j], y = y, z = zx[, j])
-  ### Rule 2 ###
-  # Rule 2(ii)
-  p2.ii <- loco_test(x = z[, -j], y = x, z = z[, j])
-  # Export
-  out <- data.frame(
-    'j' = j, 
-    'p.value' = c(p1.i, p1.ii, p2.i, p2.ii), 
-    'idx' = c('1.i', '1.ii', '2.i', '2.ii')
-  )
+  out <- list('beta' = beta, 'eps' = eps)
   return(out)
 }
-res <- foreach(a = seq_len(d_z), .combine = rbind) %dopar% ci_wrapper(a)
-res[, q.value := p.adjust(p.value, method = 'fdr')]
-res[, r1 := ifelse(.SD[idx == '1.i', q.value <= alpha] & 
-                   .SD[idx == '1.ii', q.value > alpha], TRUE, FALSE), by = j]
-res[, r2 := ifelse(.SD[idx == '2.i', q.value > alpha] | 
-                   (.SD[idx == '2.ii', q.value <= alpha] & 
-                    .SD[idx == '1.i', q.value > alpha]), TRUE, FALSE), by = j]
 
+# Entner
+entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
+  # Split training and validation sets
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
+  # Simulate data
+  dat <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  z <- as.matrix(select(dat, starts_with('z')))
+  x <- dat$x
+  zx <- cbind(z, x)
+  # Compute coefficients
+  fit_fn <- function(h, f) {
+    if (h == 'h0') y <- dat$y0 else y <- dat$y1
+    # Fit trio of models
+    f0 <- f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f)
+    f1 <- f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f)
+    f2 <- f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f)
+    # Rules
+    delta <- abs(f0$eps) - abs(f1$eps)
+    loco_p <- wilcox.test(delta, alt = 'greater')$p.value
+    r1 <- f0$beta != 0 && f1$beta == 0
+    r2 <- loco_p <= alpha || (f2$beta != 0 && f0$beta == 0)
+    # Export
+    out <- data.table(
+      'h' = h, 'f' = f, 'r1' = r1, 'r2' = r2
+    )
+    return(out)
+  }
+  out <- foreach(a = c('h0', 'h1'), .combine = rbind) %:%
+    foreach(b = c('lasso', 'step'), .combine = rbind) %do% 
+    fit_fn(a, b)
+  return(out)
+}
+res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
+  entner_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 2, xzr = 1, 
+            form = 'linear', alpha = 0.05)
 
-
+n <- 500; d_z <- 50; rho <- 0.3; k <- 25; snr <- 2; xzr <- 1; form <- 'linear'; alpha <- 0.05
 
 
 
