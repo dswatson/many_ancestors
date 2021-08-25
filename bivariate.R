@@ -37,12 +37,12 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
   # Nonlinear transformations?
   if (form != 'linear') {
     idx <- split(sample.int(d_z), sort(seq_len(d_z) %% 5))
-    names(idx) <- c('lexp', 'sqrt', 'sq', 'thresh', 'orig')
+    names(idx) <- c('lexp', 'sqrt', 'sq', 'relu', 'orig')
     zz <- z
     zz[, idx$lexp] <- log(1 + exp(z[, idx$lexp]))
     zz[, idx$sqrt] <- sqrt(abs(z[, idx$sqrt]))
     zz[, idx$sq] <- z[, idx$sq]^2
-    zz[, idx$thresh] <- ifelse(z[, idx$thresh] > 0, z[, idx$thresh], 0)
+    zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
   }
   # Draw Z weights
   sim_z_wts <- function(n, d_z, k) {
@@ -187,22 +187,6 @@ test_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
 res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
   test_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, l = 'l0')
 
-#Plot
-res %>%
-  pivot_longer(cols = c(entner, ours), 
-               names_to = 'method', values_to = 'value') %>%
-  ggplot(aes(value, fill = method)) +
-  geom_histogram(bins = 50, alpha = 0.75) + 
-  scale_fill_npg() + 
-  theme_bw() +
-  facet_grid(h ~ f, scales = 'free') 
-
-
-
-# Possible benchmarks: true score-based
-# Revised Entner: each Z gets treated as W once, 
-# see if anything satisfies R1 or R2
-
 
 sample_sizes <- c(200, 500, 1000)
 dim_z <- c(20, 50, 100)
@@ -212,6 +196,10 @@ signals <- c(1, 3, 5)
 x_strength <- c(0.5, 1, 2)
 
 
+
+# Possible benchmarks: true score-based
+# Revised Entner: each Z gets treated as W once, 
+# see if anything satisfies R1 or R2
 
 # To implement Entner's method with GCM or LOCO test
 eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
@@ -230,14 +218,14 @@ eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
     m <- unique(round(5 + ((d_z - 5) / 10^2) * seq_len(10)^2))
     y_hat <- sapply(seq_along(m), function(i) {
       tmp_x <- trn_x[, vimp$feature[seq_len(m[i])]]
-      f <- randomForest(tmp_x, trn_y, ntree = 200)
-      y_hat <- predict(f, newdata = tst_x)
+      tmp_f <- randomForest(tmp_x, trn_y, ntree = 200)
+      y_hat <- predict(tmp_f, newdata = tst_x)
       return(y_hat)
     })
   }
   eps_mat <- y_hat - tst_y
   mse <- colMeans(eps_mat^2)
-  eps <- res_mat[, which.min(mse)]
+  eps <- eps_mat[, which.min(mse)]
   return(eps)
 }
 gcm_test <- function(x, y) {
@@ -249,10 +237,12 @@ gcm_test <- function(x, y) {
   p.value <- 2 * pnorm(abs(z), lower.tail = FALSE)
   return(p.value)
 }
-loco_test <- function(f0, f1, x_tst, y_tst) {
-  eps_x <- eps_fn(z, y)
-  eps_y <- eps_fn(cbind(x, z), y)
-  delta <- abs(eps_x) - abs(eps_y)
+loco_test <- function(x, y, z) {
+  eps_f0 <- eps_fn(x_trn = x[trn, ], y_trn = y[trn],
+                   x_tst = x[tst, ], y_tst = y[tst], f)
+  eps_f1 <- eps_fn(x_trn = cbind(x[trn, ], z[trn]), y_trn = y[trn],
+                   x_tst = cbind(x[tst, ], z[tst]), y_tst = y[tst], f)
+  delta <- abs(eps_f0) - abs(eps_f1)
   p.value <- wilcox.test(delta, alt = 'greater')$p.value
   return(p.value)
 }
@@ -275,7 +265,6 @@ for (j in seq_len(d_z)) {
   rule1.ii <- ifelse(p1.ii <= alpha, FALSE, TRUE)
   # Therefore
   rule1 <- ifelse(rule1.i & rule1.ii, TRUE, FALSE)
-  
   ### Rule 2 ###
   # Rule 2(i)
   p2.i <- gcm_test(residuals(f_x), residuals(f_y))
@@ -290,36 +279,34 @@ for (j in seq_len(d_z)) {
   rule2 <- ifelse(rule2.i | (rule2.ii & rule2.iii), TRUE, FALSE)
 }
 
+
+p2.1 <- loco_test(x = z, y = y, z = x)
 # With LOCO
-for (j in seq_len(d_z)) {
+ci_wrapper <- function(j) {
   ### Rule 1 ###
   # Rule 1(i)
-  f0 <- lm(y ~ z[, -j])
-  f1_z <- lm(y ~ z)
-  p1.i <- loco_test(f0, f1_z)
-  rule1.i <- ifelse(p1.i <= alpha, TRUE, FALSE)
+  p1.i <- loco_test(x = z[, -j], y = y, z = z[, j])
   # Rule 1(ii) ...Both must put nonzero weight on X tho?
-  f0 <- lm(y ~ zx[, -j])
-  f1_zx <- lm(y ~ zx)
-  p1.ii <- loco_test(f0, f1_zx)
-  rule1.ii <- ifelse(p1.ii <= alpha, FALSE, TRUE)
-  # Therefore
-  rule1 <- ifelse(rule1.i & rule1.ii, TRUE, FALSE)
-  
+  p1.ii <- loco_test(x = zx[, -j], y = y, z = zx[, j])
   ### Rule 2 ###
-  # Rule 2(i)
-  p2.i <- loco_test(f1_z, f1_zx)
-  rule2.i <- ifelse(p2.i <= alpha, FALSE, TRUE)
   # Rule 2(ii)
-  f0_x <- lm(x ~ z[, -j])
-  f1_x <- lm(x ~ z)
-  p2.ii <- loco_test(f0_x, f1_x)
-  rule2.ii <- ifelse(p2.ii <= alpha, TRUE, FALSE)
-  # Rule 2(iii)
-  rule2.iii <- !rule1.i
-  # Therefore
-  rule2 <- ifelse(rule2.i | (rule2.ii & rule2.iii), TRUE, FALSE)
+  p2.ii <- loco_test(x = z[, -j], y = x, z = z[, j])
+  # Export
+  out <- data.frame(
+    'j' = j, 
+    'p.value' = c(p1.i, p1.ii, p2.i, p2.ii), 
+    'idx' = c('1.i', '1.ii', '2.i', '2.ii')
+  )
+  return(out)
 }
+res <- foreach(a = seq_len(d_z), .combine = rbind) %dopar% ci_wrapper(a)
+res[, q.value := p.adjust(p.value, method = 'fdr')]
+res[, r1 := ifelse(.SD[idx == '1.i', q.value <= alpha] & 
+                   .SD[idx == '1.ii', q.value > alpha], TRUE, FALSE), by = j]
+res[, r2 := ifelse(.SD[idx == '2.i', q.value > alpha] | 
+                   (.SD[idx == '2.ii', q.value <= alpha] & 
+                    .SD[idx == '1.i', q.value > alpha]), TRUE, FALSE), by = j]
+
 
 
 
