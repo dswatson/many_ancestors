@@ -1,6 +1,14 @@
 
 
-
+#Plot
+res %>%
+  pivot_longer(cols = c(entner, ours), 
+               names_to = 'method', values_to = 'value') %>%
+  ggplot(aes(value, fill = method)) +
+  geom_histogram(bins = 50, alpha = 0.75) + 
+  scale_fill_npg() + 
+  theme_bw() +
+  facet_grid(h ~ f, scales = 'free') 
 
 
 
@@ -144,22 +152,19 @@ out <- cbind(out, scores)
 
 
 # On Entner's rules:
-# R1 says that, when predicting Y, if adding X to Z *activates any Z_j* that was 
-# previously dormant, then infer X -> Y.
+# R1 says that, when predicting Y, if conditioning on X deactivates any Z_j that 
+# was previously active, then infer X -> Y.
 # R2 says that, if (a) X receives zero weight in E[Y|X,Z] OR
-# (b) there exists some Z_j with zero weight in E[X|Z] but nonzero weight
+# (b) there exists some Z_j with nonzero weight in E[X|Z] but zero weight
 # in E[Y|Z], then infer X \indep Y | Z.
 
-# Question: Why just activating in R1, why not *deactivating* as well?
 
 
 
+# Models required: E[Y|Z], E[Y|X,Z], E[X|Z]
 
 
-
-
-
-
+# Question: does it not matter *which* Z's we add or drop? 
 
 
 
@@ -327,9 +332,7 @@ res <- foreach(i = seq_len(2000), .combine = rbind) %dopar%
 
 
 
-# One idea: heteroskedastic errors as a failure mode for other methods
-# 
-
+# One idea: heteroskedastic errors as a failure mode for other methods?
 
 
 
