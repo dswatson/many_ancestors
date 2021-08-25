@@ -249,7 +249,7 @@ gcm_test <- function(x, y) {
   p.value <- 2 * pnorm(abs(z), lower.tail = FALSE)
   return(p.value)
 }
-loco_test <- function(x, y, z) {
+loco_test <- function(f0, f1, x_tst, y_tst) {
   eps_x <- eps_fn(z, y)
   eps_y <- eps_fn(cbind(x, z), y)
   delta <- abs(eps_x) - abs(eps_y)
@@ -258,7 +258,7 @@ loco_test <- function(x, y, z) {
 }
 
 
-
+# With GCM
 f_x <- lm(x ~ z)
 f_y <- lm(y ~ z)
 for (j in seq_len(d_z)) {
@@ -268,28 +268,58 @@ for (j in seq_len(d_z)) {
   f0_y <- lm(y ~ z[, -j])
   p1.i <- gcm_test(residuals(f0_w), residuals(f0_y))
   rule1.i <- ifelse(p1.i <= alpha, TRUE, FALSE)
-  # Rule 1(ii)
+  # Rule 1(ii) ...Both must put nonzero weight on X tho?
   f1_w <- lm(z[, j] ~ zx[, -j])
   f1_y <- lm(y ~ zx[, -j])
-  p1.ii <- cor.test(residuals(f1_w), residuals(f1_y))$p.value
+  p1.ii <- gcm_test(residuals(f1_w), residuals(f1_y))
   rule1.ii <- ifelse(p1.ii <= alpha, FALSE, TRUE)
   # Therefore
   rule1 <- ifelse(rule1.i & rule1.ii, TRUE, FALSE)
   
   ### Rule 2 ###
   # Rule 2(i)
-  p2.i <- cor.test(residuals(f_x), residuals(f_y))$p.value
+  p2.i <- gcm_test(residuals(f_x), residuals(f_y))
   rule2.i <- ifelse(p2.i <= alpha, FALSE, TRUE)
   # Rule 2(ii)
   f0_x <- lm(x ~ z[, -j])
-  p2 <- cor.test(residuals(f0_w), residuals(f0_x))$p.value
-  rule2.ii <- ifelse(p2 <= alpha, TRUE, FALSE)
+  p2.ii <- gcm_test(residuals(f0_w), residuals(f0_x))
+  rule2.ii <- ifelse(p2.ii <= alpha, TRUE, FALSE)
   # Rule 2(iii)
   rule2.iii <- !rule1.i
   # Therefore
   rule2 <- ifelse(rule2.i | (rule2.ii & rule2.iii), TRUE, FALSE)
 }
 
+# With LOCO
+for (j in seq_len(d_z)) {
+  ### Rule 1 ###
+  # Rule 1(i)
+  f0 <- lm(y ~ z[, -j])
+  f1_z <- lm(y ~ z)
+  p1.i <- loco_test(f0, f1_z)
+  rule1.i <- ifelse(p1.i <= alpha, TRUE, FALSE)
+  # Rule 1(ii) ...Both must put nonzero weight on X tho?
+  f0 <- lm(y ~ zx[, -j])
+  f1_zx <- lm(y ~ zx)
+  p1.ii <- loco_test(f0, f1_zx)
+  rule1.ii <- ifelse(p1.ii <= alpha, FALSE, TRUE)
+  # Therefore
+  rule1 <- ifelse(rule1.i & rule1.ii, TRUE, FALSE)
+  
+  ### Rule 2 ###
+  # Rule 2(i)
+  p2.i <- loco_test(f1_z, f1_zx)
+  rule2.i <- ifelse(p2.i <= alpha, FALSE, TRUE)
+  # Rule 2(ii)
+  f0_x <- lm(x ~ z[, -j])
+  f1_x <- lm(x ~ z)
+  p2.ii <- loco_test(f0_x, f1_x)
+  rule2.ii <- ifelse(p2.ii <= alpha, TRUE, FALSE)
+  # Rule 2(iii)
+  rule2.iii <- !rule1.i
+  # Therefore
+  rule2 <- ifelse(rule2.i | (rule2.ii & rule2.iii), TRUE, FALSE)
+}
 
 
 
