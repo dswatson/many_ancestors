@@ -259,27 +259,44 @@ algs <- c('lasso', 'step', 'rf')
 
 
 
-
+eps_fn <- function(des) {
+  tmp <- as.data.frame(cbind(des, 'y' = y))
+  f <- lm(y ~ ., data = tmp[trn, ])
+  eps <- tmp$y[tst] - predict(f, tmp[tst, ])
+  return(eps)
+}
 # Simplified Entner 2.0: loop through Z's (linear prototype)
-library(lmtest)
 entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha, adj) {
   # Simulate data
   sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
   dat <- as.data.frame(sim$dat)
+  z <- as.matrix(select(dat, starts_with('z')))
+  x <- dat$x
+  zx <- cbind(z, x)
+  # Split training and validation sets
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   # Fit models
   fit_fn <- function(h) {
-    if (h == 'h0') tmp <- select(dat, -y1) else tmp <- select(dat, -y0)
-    tmp <- tmp %>% rename(y = starts_with('y'))
-    # Full models
-    f_1i <- lm(y ~ ., data = select(tmp, -x))
-    f_1ii <- lm(y ~ ., data = tmp)
-    # Null models
+    if (h == 'h0') y <- dat$y0 else y <- dat$y1
+    # Residuals for full models
+    eps_1i <- eps_fn(z)
+    eps_1ii <- eps_fn(zx)
+    # Residuals for null models
     p_i <- p_ii <- double(length = d_z)
     for (j in seq_len(d_z)) {
-      f_0i <- lm(y ~ ., data = select(tmp[, -j], -x))
-      f_0ii <- lm(y ~ ., data = tmp[, -j])
-      p_i[j] <- lrtest(f_0i, f_1i)[2, 5]
-      p_ii[j] <- lrtest(f_0ii, f_1ii)[2, 5]
+      eps_0i <- eps_fn(z[, -j])
+      eps_0ii <- eps_fn(zx[, -j])
+      delta_i <- abs(eps_0i) - abs(eps_1i)
+      delta_ii <- abs(eps_0ii) - abs(eps_1ii)
+      p_i[j] <- wilcox.test(delta_i, alt = 'greater')$p.value
+      p_ii[j] <- wilcox.test(delta_ii, alt = 'less')$p.value
+      #delta_i <- sign(abs(eps_0i) - abs(eps_1i))
+      #delta_ii <- sign(abs(eps_0ii) - abs(eps_1ii))
+      #p_i[j] <- binom.test(sum(delta_i > 0), length(delta_i), 
+      #                     alt = 'greater')$p.value
+      #p_ii[j] <- binom.test(sum(delta_ii > 0), length(delta_ii), 
+      #                      alt = 'less')$p.value
     }
     # Expected and observed
     if (adj) {
@@ -290,7 +307,7 @@ entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha, adj) {
     r1 <- p_i <= alpha & p_ii <= alpha
     R1 <- sim$wts$x != 0 & sim$wts$y == 0
     # Export results
-    out <- data.table('b' = b, 'h' = h, 'R1' = R1, 'r1' = r1)
+    out <- data.table('b' = b, 'h' = h, 'f' = f, 'R1' = R1, 'r1' = r1)
     return(out)
   }
   out <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do% fit_fn(hh)
@@ -300,7 +317,8 @@ res <- foreach(i = seq_len(200), .combine = rbind) %dopar%
   entner2_fn(i, n = 500, d_z = 50, rho = 0.3, sp = 0.5, snr = 5, xzr = 1, 
              form = 'linear', alpha = 0.05, adj = FALSE)
 
-
+# Another idea: Bayesian approach. Set a prior mean(delta) ~ N(0, sigma), and 
+# update accordingly. From this we can analytically compute q-values.
 
 
 
