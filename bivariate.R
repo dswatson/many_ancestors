@@ -87,6 +87,7 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
 #' @param min_d Number of predictors in smallest model.
 #' @param decay Exponential decay parameter
 
+# Precompute subset sizes for RFE
 subsets <- function(m, max_d, min_d, decay) {
   unique(round(min_d + ((max_d - min_d) / m^decay) * seq_len(m)^decay))
 }
@@ -98,6 +99,7 @@ subsets <- function(m, max_d, min_d, decay) {
 #' @param tst_y Test outcomes.
 #' @param f Regression function to use. 
 
+# Fit regressions, return estimated weights and residuals
 f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
@@ -144,6 +146,7 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
 #' @param form Functional form for structural equations.
 #' @param l Norm to use, either 0, 1, or 2.
 
+# Estimate causal directions by taking difference-in-differences between norms
 our_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
   # Simulate data
   sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
@@ -191,7 +194,7 @@ sparsity <- c(0.1, 0.5, 0.9)
 signals <- c(1, 3, 5)
 x_strength <- c(0.5, 1, 2)
 
-# Entner
+# Simplified Entner test: evaluate R1 and R2 using sparse regression
 entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
   # Simulate data
   sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
