@@ -16,8 +16,8 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
 #' @param rho Auto-correlation of the Toeplitz matrix for Z.
-#' @param k Number of nonzero weights from Z to children. Either a scalar, in  
-#'   which case it applies to both X and Y, or a length-two vector.
+#' @param sp Proportion of nonzero weights from Z to children. Either a 
+#'   scalar, in which case it applies to both X and Y, or a length-two vector.
 #' @param snr Signal-to-noise ratio for true data generating functions. Either a 
 #'   scalar, in which case it applies to both X and Y, or a length-two vector.
 #' @param xzr X-to-Z ratio, i.e. the ratio of X-signal to Z-signal for 
@@ -26,7 +26,7 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #'   \code{"nonlinear"}?
 
 # Data simulation function
-sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
+sim_dat <- function(n, d_z, rho, sp, snr, xzr, form) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
   if (rho != 0) {
@@ -45,6 +45,7 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
     zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
   }
   # Draw weights for Z
+  k <- round(sp * d_z)
   sim_wts <- function(n, d_z, k) {
     nonzero <- sample(d_z, k)
     amplitude <- seq(1, 20, length.out = k) # Why 20?
@@ -98,9 +99,10 @@ subsets <- function(m, max_d, min_d, decay) {
 #' @param tst_x Test set of predictors.
 #' @param tst_y Test outcomes.
 #' @param f Regression function to use. 
+#' @param d_z Dimensionality of Z.
 
 # Fit regressions, return estimated weights and residuals
-f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
+f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
     y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
@@ -128,6 +130,7 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
     y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
     betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
   }
+  # Find best fit, export results
   epsilon <- y_hat - tst_y
   mse <- colMeans(epsilon^2)
   out <- list('beta' = betas[, which.min(mse)], 
@@ -140,16 +143,16 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
 #' @param rho Auto-correlation of the Toeplitz matrix for Z.
-#' @param k Number of nonzero weights from Z to children.
+#' @param sp Proportion of nonzero weights from Z to children.
 #' @param snr Signal-to-noise ratio. 
 #' @param xzr X-to-Z ratio.
 #' @param form Functional form for structural equations.
 #' @param l Norm to use, either 0, 1, or 2.
 
 # Estimate causal directions by taking difference-in-differences between norms
-our_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
+our_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, l) {
   # Simulate data
-  sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
   dat <- sim$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
@@ -162,10 +165,10 @@ our_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
     betas <- list(
-      f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f)$beta,
-      f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f)$beta,
-      f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f)$beta,
-      f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f)$beta
+      f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f, d_z)$beta,
+      f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)$beta,
+      f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)$beta,
+      f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f, d_z)$beta
     )
     v <- sapply(seq_len(4), function(f_idx) {
       switch(l, 'l0' = sum(betas[[f_idx]] != 0), 
@@ -179,25 +182,19 @@ our_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
     out <- data.table('h' = h, 'f' = f, 'delta' = delta)
     return(out)
   }
-  out <- foreach(a = c('h0', 'h1'), .combine = rbind) %:%
-    foreach(b = c('lasso', 'step'), .combine = rbind) %do% fit_fn(h = a, f = b)
+  out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %:%
+    foreach(bb = c('lasso', 'step'), .combine = rbind) %do% 
+    fit_fn(h = aa, f = bb)
   return(out)
 }
 res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
-  our_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, l = 'l0')
+  our_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, 
+         form = 'linear', l = 'l0')
 
-
-sample_sizes <- c(200, 500, 1000)
-dim_z <- c(20, 50, 100)
-auto_cor <- c(0, 0.3, 0.5)
-sparsity <- c(0.1, 0.5, 0.9)
-signals <- c(1, 3, 5)
-x_strength <- c(0.5, 1, 2)
-
-# Simplified Entner test: evaluate R1 and R2 using sparse regression
-entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
+# Simplified Entner test: evaluate R1 and R2 per Z using sparse regression
+entner_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
   # Simulate data
-  sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
   dat <- sim$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
@@ -209,16 +206,20 @@ entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
   fit_fn <- function(h, f) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     # Three different designs
-    f0 <- f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f)
-    f1 <- f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f)
-    f2 <- f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f)
+    f0 <- f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f, d_z)
+    f1 <- f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)
+    f2 <- f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)
     # Evaluate rules
     delta <- abs(f0$eps) - abs(f1$eps)
     loco_p <- wilcox.test(delta, alt = 'greater')$p.value
     r1 <- f0$beta != 0 & f1$beta == 0
     r2 <- loco_p <= alpha | (f2$beta != 0 & f0$beta == 0)
+    # Ground truth?
+    R1 <- sim$wts$x != 0 & sim$wts$y == 0
     # Export results
-    out <- data.table('b' = b, 'h' = h, 'f' = f, 'r1' = r1, 'r2' = r2)
+    out <- data.table(
+      'b' = b, 'h' = h, 'f' = f, 'R1' = R1, 'r1' = r1, 'r2' = r2
+    )
     return(out)
   }
   out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %:%
@@ -244,7 +245,15 @@ form <- 'linear'; alpha <- 0.05
 # Score-based benchmark?
 
 
-
+# Simulation settings
+ns <- c(200, 500, 1000)
+dim_zs <- c(20, 50, 100)
+rhos <- c(0, 0.3, 0.5)
+sps <- c(0.1, 0.5, 0.9)
+snrs <- c(1, 3, 5)
+xzrs <- c(0.5, 1, 2)
+forms <- c('linear', 'nonlinear')
+algs <- c('lasso', 'step', 'rf')
 
 
 
