@@ -44,8 +44,8 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
     zz[, idx$sq] <- z[, idx$sq]^2
     zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
   }
-  # Draw Z weights
-  sim_z_wts <- function(n, d_z, k) {
+  # Draw weights for Z
+  sim_wts <- function(n, d_z, k) {
     nonzero <- sample(d_z, k)
     amplitude <- seq(1, 20, length.out = k) # Why 20?
     signs <- sample(c(1, -1), size = d_z, replace = TRUE)
@@ -53,14 +53,14 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
     return(beta)
   }
   # Generate noise
-  sim_u <- function(signal, snr) {
+  sim_noise <- function(signal, snr) {
     noise_factor <- sqrt(var(signal) / snr)
     noise <- rnorm(n, sd = noise_factor) 
     return(noise)
   }
   ### Null scenario: X \indep Y | Z
-  beta_z_to_x <- sim_z_wts(n, d_z, k)
-  beta_z_to_y <- sim_z_wts(n, d_z, k)
+  beta_z_to_x <- sim_wts(n, d_z, k)
+  beta_z_to_y <- sim_wts(n, d_z, k)
   if (form == 'linear') {
     signal_x <- as.numeric(z %*% beta_z_to_x)
     signal_y <- as.numeric(z %*% beta_z_to_y)
@@ -68,29 +68,27 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
     signal_x <- as.numeric(zz %*% beta_z_to_x)
     signal_y <- as.numeric(zz %*% beta_z_to_y)
   }
-  noise_x <- sim_u(signal_x, snr)
-  noise_y <- sim_u(signal_y, snr)
-  x <- signal_x + noise_x
-  y0 <- signal_y + noise_y
+  x <- signal_x + sim_noise(signal_x, snr)
+  y0 <- signal_y + sim_noise(signal_y, snr)
   ### Alternative scenario: X -> Y
-  beta_z_to_y <- sim_z_wts(n, d_z, k)
-  if (form == 'linear') {
-    signal_z_to_y <- as.numeric(z %*% beta_z_to_y)
-    sigma_x_to_y <- sqrt(xzr * var(signal_z_to_y))
-    beta_x_to_y <- sigma_x_to_y / sd(x)
-    signal_y <- signal_z_to_y + x * c(beta_x_to_y)
-  } else {
-    signal_z_to_y <- as.numeric(zz %*% beta_z_to_y)
-    xx <- log(1 + exp(x))
-    sigma_x_to_y <- sqrt(xzr * var(signal_z_to_y))
-    beta_x_to_y <- sigma_x_to_y / sd(xx)
-    signal_y <- signal_z_to_y + xx * c(beta_x_to_y)
-  }
-  noise_y <- sim_u(signal_y, snr)
-  y1 <- signal_y + noise_y
+  signal_z_to_y <- signal_y
+  sigma_x_to_y <- sqrt(xzr * var(signal_z_to_y))
+  beta_x_to_y <- sigma_x_to_y / sd(x)
+  signal_y <- signal_z_to_y + x * beta_x_to_y
+  y1 <- signal_y + sim_noise(signal_y, snr)
   # Export
-  out <- data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1)
+  out <- list('dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
+              'wts' = data.table('x' = beta_z_to_x, 'y' = beta_z_to_y))
   return(out)
+}
+
+#' @param m Number of nested models to fit.
+#' @param max_x Number of predictors in largest model.
+#' @param min_d Number of predictors in smallest model.
+#' @param decay Exponential decay parameter
+
+subsets <- function(m, max_d, min_d, decay) {
+  unique(round(min_d + ((max_d - min_d) / m^decay) * seq_len(m)^decay))
 }
 
 
@@ -100,38 +98,39 @@ sim_dat <- function(n, d_z, rho, k, snr, xzr, form) {
 #' @param tst_y Test outcomes.
 #' @param f Regression function to use. 
 
-beta_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
+f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
     y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
-    mse <- colMeans((y_hat - tst_y)^2)
-    beta <- as.numeric(coef(fit, s = fit$lambda[which.min(mse)]))[1:d_z]
+    betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
   } else if (f == 'step') {
     fit <- fs(trn_x, trn_y, intercept = FALSE, verbose = FALSE)
     y_hat <- predict(fit, newx = tst_x)
-    mse <- colMeans((y_hat - tst_y)^2)
-    beta <- coef(fit)[1:d_z, which.min(mse)]
+    betas <- coef(fit)[1:d_z, ]
   } else if (f == 'rf') {
     fit <- randomForest(trn_x, trn_y, ntree = 500)
     vimp <- data.frame('feature' = colnames(trn_x), 
                            'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
-    # Consider 10 models, min d = 5, quadratic decay on dimensionality
-    m <- unique(round(5 + ((d_z - 5) / 10^2) * seq_len(10)^2))
-    err <- sapply(seq_along(m), function(i) {
-      tmp_x <- trn_x[, vimp$feature[seq_len(m[i])]]
-      f <- randomForest(tmp_x, trn_y, ntree = 200)
-      y_hat <- predict(f, newdata = tst_x)
-      mse <- mean((y_hat - tst_y)^2)
-      return(mse)
-    })
-    k_hat <- m[which.min(err)]
     beta <- double(length = d_z)
     names(beta) <- paste0('z', seq_len(d_z))
-    keep <- vimp$feature[seq_len(k_hat)]
-    beta[keep] <- vimp$imp[seq_len(k_hat)]
+    s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
+    rfe_loop <- function(k) {
+      tmp_x <- trn_x[, vimp$feature[seq_len(s[k])]]
+      tmp_f <- randomForest(tmp_x, trn_y, ntree = 200)
+      beta[colnames(tmp_x)] <- as.numeric(importance(tmp_f))
+      out <- list('y_hat' = predict(tmp_f, newdata = tst_x), 'beta' = beta)
+      return(out)
+    }
+    rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
+    y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
+    betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
   }
-  return(beta)
+  epsilon <- y_hat - tst_y
+  mse <- colMeans(epsilon^2)
+  out <- list('beta' = betas[, which.min(mse)], 
+               'eps' = epsilon[, which.min(mse)])
+  return(out)
 }
 
 
@@ -145,39 +144,36 @@ beta_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
 #' @param form Functional form for structural equations.
 #' @param l Norm to use, either 0, 1, or 2.
 
-# Big ol' wrapper
-test_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
-  # Split training and validation sets
-  trn <- sample(n, round(0.8 * n))
-  tst <- seq_len(n)[-trn]
+our_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
   # Simulate data
-  dat <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  dat <- sim$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   zx <- cbind(z, x)
+  # Split training and validation sets
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   # Compute coefficients
   fit_fn <- function(h, f) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
     betas <- list(
-      beta_fn(z[trn, ], y[trn], z[tst, ], y[tst], f),
-      beta_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f),
-      beta_fn(z[trn, ], x[trn], z[tst, ], x[tst], f),
-      beta_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f)
+      f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f)$beta,
+      f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f)$beta,
+      f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f)$beta,
+      f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f)$beta
     )
-    v <- sapply(seq_len(4), function(i) {
-      switch(l, 
-             'l0' = sum(betas[[i]] != 0),
-             'l1' = sum(abs(betas[[i]])),
-             'l2' = sum(betas[[i]]^2)
-      )})
+    v <- sapply(seq_len(4), function(f_idx) {
+      switch(l, 'l0' = sum(betas[[f_idx]] != 0), 
+                'l1' = sum(abs(betas[[f_idx]])),
+                'l2' = sum(betas[[f_idx]]^2))
+    })
     w0 <- v[1] - v[2]
     w1 <- v[3] - v[4]
     delta <- w0 - w1
-    out <- data.table(
-      'h' = h, 'f' = f, 'delta' = delta
-    )
     # Export
+    out <- data.table('h' = h, 'f' = f, 'delta' = delta)
     return(out)
   }
   out <- foreach(a = c('h0', 'h1'), .combine = rbind) %:%
@@ -185,7 +181,7 @@ test_fn <- function(b, n, d_z, rho, k, snr, xzr, form, l) {
   return(out)
 }
 res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
-  test_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, l = 'l0')
+  our_fn(i, n = 500, d_z = 50, rho = 0.3, k = 25, snr = 3, xzr = 1, l = 'l0')
 
 
 sample_sizes <- c(200, 500, 1000)
@@ -195,55 +191,11 @@ sparsity <- c(0.1, 0.5, 0.9)
 signals <- c(1, 3, 5)
 x_strength <- c(0.5, 1, 2)
 
-
-
-# Possible benchmarks: true score-based
-# Revised Entner: each Z gets treated as W once, 
-# see if anything satisfies R1 or R2
-
-
-f_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
-  if (f == 'lasso') {
-    fit <- glmnet(trn_x, trn_y, intercept = FALSE)
-    y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
-    eps_mat <- y_hat - tst_y
-    mse <- colMeans(eps_mat^2)
-    beta <- as.numeric(coef(fit, s = fit$lambda[which.min(mse)]))[1:d_z]
-  } else if (f == 'step') {
-    fit <- fs(trn_x, trn_y, intercept = FALSE, verbose = FALSE)
-    y_hat <- predict(fit, newx = tst_x)
-    eps_mat <- y_hat - tst_y
-    mse <- colMeans(eps_mat^2)
-    beta <- coef(fit)[1:d_z, which.min(mse)]
-  } else if (f == 'rf') {
-    fit <- randomForest(trn_x, trn_y, ntree = 500)
-    vimp <- data.frame('feature' = colnames(trn_x), 
-                       'imp' = as.numeric(importance(fit))) %>%
-      arrange(desc(imp))
-    # Consider 10 models, min d = 5, quadratic decay on dimensionality
-    m <- unique(round(5 + ((d_z - 5) / 10^2) * seq_len(10)^2))
-    eps_mat <- sapply(seq_along(m), function(i) {
-      tmp_x <- trn_x[, vimp$feature[seq_len(m[i])]]
-      tmp_f <- randomForest(tmp_x, trn_y, ntree = 200)
-      y_hat <- predict(tmp_f, newdata = tst_x)
-      return(y_hat - tst_y)
-    })
-    mse <- colMeans(eps_mat^2)
-    k_hat <- m[which.min(mse)]
-    beta <- double(length = d_z)
-    names(beta) <- paste0('z', seq_len(d_z))
-    keep <- vimp$feature[seq_len(k_hat)]
-    beta[keep] <- vimp$imp[seq_len(k_hat)]
-  }
-  eps <- eps_mat[, which.min(mse)]
-  out <- list('beta' = beta, 'eps' = eps)
-  return(out)
-}
-
 # Entner
 entner_fn <- function(b, n, d_z, rho, k, snr, xzr, form, alpha) {
   # Simulate data
-  dat <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  sim <- sim_dat(n, d_z, rho, k, snr, xzr, form)
+  dat <- sim$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   zx <- cbind(z, x)
@@ -279,9 +231,14 @@ n <- 500; d_z <- 50; rho <- 0.3; k <- 25; snr <- 5; xzr <- 1;
 form <- 'linear'; alpha <- 0.05
 
 
+# Need to record which Z's are "instrumental", i.e. satisfy
+# Z -> X -> Y and Z \ind Y | X. Define k := number of such Z's.
+# Then we should expect k many Z's to satisfy R1 under h1 and 
+# 0 to satisfy R1 under h0. We should also expect d_z many Z's
+# to satisfy R2 under h0 and 0 to satisfy under h1.
 
 
-
+# Score-based benchmark?
 
 
 
