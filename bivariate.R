@@ -266,7 +266,7 @@ eps_fn <- function(des) {
   return(eps)
 }
 # Simplified Entner 2.0: loop through Z's (linear prototype)
-entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha, adj) {
+entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
   # Simulate data
   sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
   dat <- as.data.frame(sim$dat)
@@ -289,25 +289,19 @@ entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha, adj) {
       eps_0ii <- eps_fn(zx[, -j])
       delta_i <- abs(eps_0i) - abs(eps_1i)
       delta_ii <- abs(eps_0ii) - abs(eps_1ii)
-      p_i[j] <- wilcox.test(delta_i, alt = 'greater')$p.value
-      p_ii[j] <- wilcox.test(delta_ii, alt = 'less')$p.value
+      #p_i[j] <- wilcox.test(delta_i, alt = 'greater')$p.value
+      #p_ii[j] <- wilcox.test(delta_ii, alt = 'less')$p.value
       #delta_i <- sign(abs(eps_0i) - abs(eps_1i))
       #delta_ii <- sign(abs(eps_0ii) - abs(eps_1ii))
-      #p_i[j] <- binom.test(sum(delta_i > 0), length(delta_i), 
-      #                     alt = 'greater')$p.value
-      #p_ii[j] <- binom.test(sum(delta_ii > 0), length(delta_ii), 
-      #                      alt = 'less')$p.value
-    }
-    # Expected and observed
-    if (adj) {
-      q <- p.adjust(c(p_i, p_ii), method = 'fdr')
-      p_i <- q[seq_len(d_z)]
-      p_ii <- q[(d_z + 1):(2 * d_z)]
+      p_i[j] <- binom.test(sum(delta_i > 0), length(delta_i), 
+                           alt = 'greater')$p.value
+      p_ii[j] <- binom.test(sum(delta_ii > 0), length(delta_ii), 
+                            alt = 'less')$p.value
     }
     r1 <- p_i <= alpha & p_ii <= alpha
     R1 <- sim$wts$x != 0 & sim$wts$y == 0
     # Export results
-    out <- data.table('b' = b, 'h' = h, 'f' = f, 'R1' = R1, 'r1' = r1)
+    out <- data.table('b' = b, 'h' = h, 'R1' = R1, 'r1' = r1)
     return(out)
   }
   out <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do% fit_fn(hh)
@@ -315,10 +309,8 @@ entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha, adj) {
 }
 res <- foreach(i = seq_len(200), .combine = rbind) %dopar% 
   entner2_fn(i, n = 500, d_z = 50, rho = 0.3, sp = 0.5, snr = 5, xzr = 1, 
-             form = 'linear', alpha = 0.05, adj = FALSE)
+             form = 'linear', alpha = 0.05)
 
-# Another idea: Bayesian approach. Set a prior mean(delta) ~ N(0, sigma), and 
-# update accordingly. From this we can analytically compute q-values.
 
 
 
