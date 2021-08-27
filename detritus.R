@@ -10,6 +10,29 @@ res %>%
   theme_bw() +
   facet_grid(h ~ f, scales = 'free') 
 
+# BAYES???
+gaussian_update <- function(x, mu0, sigma0, kappa0, nu0) {
+  n <- length(x)
+  xbar <- mean(x)
+  s <- sd(x)
+  mu1 <- weighted.mean(x = c(mu0, xbar), w = c(kappa0, n))
+  kappa1 <- kappa0 + n
+  nu1 <- nu0 + n
+  nu1sigma1 <- nu0 * sigma0^2 + (n - 1)*s^2 + 
+    ((kappa0 * n) / kappa1) * (xbar - mu0)^2
+  
+}
+mu1 <- (n / (sigma_hat^2) + sigma0^(-2))^(-1) * 
+  (n * mu_hat / (sigma_hat^2) + mu0 / (sigma0^2))
+sigma1 <- sqrt((n / (sigma_hat ^ 2) + sigma0 ^ (-2)) ^ (-1))
+
+
+sigma1^2
+
+sigma1^2 ~ inv_chisq(nu0, sigma0^2)
+sigma1^2 / (sigma0^2*nu0) ~ inv_chisq(nu0)
+
+(sigma0^2 * nu0) / sigma1^2 ~ chisq(nu0)
 
 
 # Four possible outputs: no edge, X -> Y, Y -> X, or ?
