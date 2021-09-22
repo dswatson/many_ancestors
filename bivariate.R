@@ -16,26 +16,24 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
 #' @param rho Auto-correlation of the Toeplitz matrix for Z.
-#' @param sp Proportion of nonzero weights from Z to children. Either a 
-#'   scalar, in which case it applies to both X and Y, or a length-two vector.
-#' @param snr Signal-to-noise ratio for true data generating functions. Either a 
-#'   scalar, in which case it applies to both X and Y, or a length-two vector.
-#' @param xzr X-to-Z ratio, i.e. the ratio of X-signal to Z-signal for 
-#'   generating Y when X -> Y.
-#' @param form Should structural equations be \code{"linear"} or 
-#'   \code{"nonlinear"}?
+#' @param sp_x Proportion of nonzero weights from Z to X. 
+#' @param sp_y Proportion of nonzero weights from Z to Y.
+#' @param r2_x Proportion of variance explained in the DGP for X.
+#' @param r2_y Proportion of variance explained in the DGP for Y.
+#' @param xzr Ratio of X-signal to Z-signal when X -> Y.
+#' @param form Should edges from Z encode \code{"linear"} or \code{"nonlinear"}
+#'   structural equations?
 
 # Data simulation function
-sim_dat <- function(n, d_z, rho, sp, snr, xzr, form) {
+sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
-  if (rho != 0) {
-    Sigma <- toeplitz(rho^(0:(d_z - 1)))
-    z <- z %*% chol(Sigma)
-  } 
-  dimnames(z) <- list(NULL, paste0('z', seq_len(d_z)))
+  var_z <- 1 / d_z
+  Sigma <- toeplitz(rho^(0:(d_z - 1))) * var_z
+  z <- z %*% chol(Sigma)
+  colnames(z) <- paste0('z', seq_len(d_z))
   # Nonlinear transformations?
-  if (form != 'linear') {
+  if (form == 'nonlinear') {
     idx <- split(sample.int(d_z), sort(seq_len(d_z) %% 5))
     names(idx) <- c('lexp', 'sqrt', 'sq', 'relu', 'orig')
     zz <- z
@@ -44,42 +42,38 @@ sim_dat <- function(n, d_z, rho, sp, snr, xzr, form) {
     zz[, idx$sq] <- z[, idx$sq]^2
     zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
   }
-  # Draw weights for Z
-  k <- round(sp * d_z)
-  sim_wts <- function(n, d_z, k) {
-    nonzero <- sample(d_z, k)
-    amplitude <- seq(1, 20, length.out = k) # Why 20?
-    signs <- sample(c(1, -1), size = d_z, replace = TRUE)
-    beta <- amplitude * (seq_len(d_z) %in% nonzero) / sqrt(n) * signs
-    return(beta)
+  # Sample weights
+  beta <- gamma <- double(length = d_z)
+  beta[sample(d_z, round(sp_x * d_z))] <- 1
+  gamma[sample(d_z, round(sp_y * d_z))] <- 1
+  if (form == 'linear') {
+    signal_x <- as.numeric(z %*% beta)
+    signal_y <- as.numeric(z %*% gamma)
+  } else {
+    signal_x <- as.numeric(zz %*% beta)
+    signal_y <- as.numeric(zz %*% gamma)
   }
   # Generate noise
-  sim_noise <- function(signal, snr) {
-    noise_factor <- sqrt(var(signal) / snr)
-    noise <- rnorm(n, sd = noise_factor) 
+  sim_noise <- function(signal, r2) {
+    var_mu <- var(signal)
+    var_noise <- (var_mu - r2 * var_mu) / r2
+    noise <- rnorm(n, sd = sqrt(var_noise))
     return(noise)
   }
   ### Null scenario: X \indep Y | Z
-  beta_z_to_x <- sim_wts(n, d_z, k)
-  beta_z_to_y <- sim_wts(n, d_z, k)
-  if (form == 'linear') {
-    signal_x <- as.numeric(z %*% beta_z_to_x)
-    signal_y <- as.numeric(z %*% beta_z_to_y)
-  } else {
-    signal_x <- as.numeric(zz %*% beta_z_to_x)
-    signal_y <- as.numeric(zz %*% beta_z_to_y)
-  }
-  x <- signal_x + sim_noise(signal_x, snr)
-  y0 <- signal_y + sim_noise(signal_y, snr)
+  x <- signal_x + sim_noise(signal_x, r2_x)
+  y0 <- signal_y + sim_noise(signal_y, r2_y)
   ### Alternative scenario: X -> Y
   signal_z_to_y <- signal_y
-  sigma_x_to_y <- sqrt(xzr * var(signal_z_to_y))
-  beta_x_to_y <- sigma_x_to_y / sd(x)
-  signal_y <- signal_z_to_y + x * beta_x_to_y
-  y1 <- signal_y + sim_noise(signal_y, snr)
+  sigma_xy <- sqrt(xzr * var(signal_z_to_y))
+  alpha <- sigma_xy / sd(x)
+  signal_y <- signal_z_to_y + x * alpha
+  y1 <- signal_y + sim_noise(signal_y, r2_y)
   # Export
-  out <- list('dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
-              'wts' = data.table('x' = beta_z_to_x, 'y' = beta_z_to_y))
+  out <- list(
+    'dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
+    'wts' = list('beta' = beta, 'gamma' = gamma, 'alpha' = alpha)
+  )
   return(out)
 }
 
@@ -143,14 +137,16 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
 #' @param rho Auto-correlation of the Toeplitz matrix for Z.
-#' @param sp Proportion of nonzero weights from Z to children.
-#' @param snr Signal-to-noise ratio. 
+#' @param sp_x Proportion of nonzero weights from Z to X.
+#' @param sp_y Proportion of nonzero weights from Z to Y.
+#' @param r2_x Proportion of variance explained in the DGP for X.
+#' @param r2_y Proportion of variance explained in the DGP for Y.
 #' @param xzr X-to-Z ratio.
 #' @param form Functional form for structural equations.
 #' @param l Norm to use, either 0, 1, or 2.
 
 # Estimate causal directions by taking difference-in-differences between norms
-our_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, l) {
+our_fn <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form, l) {
   # Simulate data
   sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
   dat <- sim$dat
@@ -173,7 +169,7 @@ our_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, l) {
     v <- sapply(seq_len(4), function(f_idx) {
       switch(l, 'l0' = sum(betas[[f_idx]] != 0), 
                 'l1' = sum(abs(betas[[f_idx]])),
-                'l2' = sum(betas[[f_idx]]^2))
+                'l2' = sqrt(sum(betas[[f_idx]]^2)))
     })
     w0 <- v[1] - v[2]
     w1 <- v[3] - v[4]
@@ -188,8 +184,8 @@ our_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, l) {
   return(out)
 }
 res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
-  our_fn(i, n = 500, d_z = 50, rho = 0.3, sp = 0.5, snr = 3, xzr = 1, 
-         form = 'linear', l = 'l0')
+  our_fn(i, n = 500, d_z = 50, rho = 0.3, sp_x = 0.5, sp_y = 0.5, 
+         r2_x = 0.75, r2_y = 0.75, xzr = 1, form = 'linear', l = 'l0')
 
 # Simplified Entner test: evaluate R1 and R2 per Z using sparse regression
 entner_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
@@ -209,11 +205,10 @@ entner_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
     f1 <- f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)
     f2 <- f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)
     # Evaluate rules
-    #delta <- abs(f0$eps) - abs(f1$eps)
-    #loco_p <- wilcox.test(delta, alt = 'greater')$p.value
     delta <- abs(f0$eps) - abs(f1$eps)
-    loco_p <- binom.test(sum(sign(delta) > 0), length(delta), 
-                         alt = 'greater')$p.value
+    loco_p <- wilcox.test(delta, alt = 'greater')$p.value
+    #loco_p <- binom.test(sum(sign(delta) > 0), length(delta), 
+    #                     alt = 'greater')$p.value
     r1 <- f0$beta != 0 & f1$beta == 0
     r2 <- loco_p <= alpha | (f2$beta != 0 & f0$beta == 0)
     # Ground truth?
@@ -289,14 +284,18 @@ entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
       eps_0ii <- eps_fn(zx[, -j])
       delta_i <- abs(eps_0i) - abs(eps_1i)
       delta_ii <- abs(eps_0ii) - abs(eps_1ii)
-      #p_i[j] <- wilcox.test(delta_i, alt = 'greater')$p.value
-      #p_ii[j] <- wilcox.test(delta_ii, alt = 'less')$p.value
+      p_i[j] <- wilcox.test(delta_i, alt = 'greater')$p.value
+      p_ii[j] <- wilcox.test(delta_ii, alt = 'less')$p.value
       #delta_i <- sign(abs(eps_0i) - abs(eps_1i))
       #delta_ii <- sign(abs(eps_0ii) - abs(eps_1ii))
-      p_i[j] <- binom.test(sum(delta_i > 0), length(delta_i), 
-                           alt = 'greater')$p.value
-      p_ii[j] <- binom.test(sum(delta_ii > 0), length(delta_ii), 
-                            alt = 'less')$p.value
+      #p_i[j] <- binom.test(sum(delta_i > 0), length(delta_i), 
+      #                     alt = 'greater')$p.value
+      #p_ii[j] <- binom.test(sum(delta_ii > 0), length(delta_ii), 
+      #                      alt = 'less')$p.value
+      #t_i <- mean(delta_i) / (sd(delta_i) / sqrt(n))
+      #p_i[j] <- pt(0, df = n - 1, ncp = t_i)
+      #t_ii <- mean(delta_ii) / (sd(delta_ii) / sqrt(n))
+      #p_ii[j] <- 1 - pt(0, df = n - 1, ncp = t_ii)
     }
     r1 <- p_i <= alpha & p_ii <= alpha
     R1 <- sim$wts$x != 0 & sim$wts$y == 0
@@ -309,7 +308,7 @@ entner2_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
 }
 res <- foreach(i = seq_len(200), .combine = rbind) %dopar% 
   entner2_fn(i, n = 500, d_z = 50, rho = 0.3, sp = 0.5, snr = 5, xzr = 1, 
-             form = 'linear', alpha = 0.05)
+             form = 'linear', alpha = 0.1)
 
 
 
