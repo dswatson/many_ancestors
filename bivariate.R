@@ -90,24 +90,26 @@ subsets <- function(m, max_d, min_d, decay) {
 
 #' @param trn_x Training set of predictors.
 #' @param trn_y Training outcomes.
+#' @param val_x Validation set of predictors.
+#' @param val_y Validation outcomes.
 #' @param tst_x Test set of predictors.
 #' @param tst_y Test outcomes.
 #' @param f Regression function to use. 
 #' @param d_z Dimensionality of Z.
 
 # Fit regressions, return estimated weights and residuals
-f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
+f_fn <- function(trn_x, trn_y, val_x, val_y, tst_x, tst_y, f, d_z) {
   if (f == 'lasso') {
     fit <- glmnet(trn_x, trn_y, intercept = FALSE)
-    y_hat <- predict(fit, newx = tst_x, s = fit$lambda)
+    y_hat <- predict(fit, newx = val_x, s = fit$lambda)
     betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
   } else if (f == 'step') {
     fit <- fs(trn_x, trn_y, intercept = FALSE, verbose = FALSE)
-    y_hat <- predict(fit, newx = tst_x)
+    y_hat <- predict(fit, newx = val_x)
     betas <- coef(fit)[1:d_z, ]
   } else if (f == 'rf') {
     fit <- randomForest(trn_x, trn_y, ntree = 500)
-    vimp <- data.frame('feature' = colnames(trn_x), 
+    vimp <- data.frame('feature' = colnames(val_x), 
                            'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
     beta <- double(length = d_z)
@@ -117,7 +119,8 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
       tmp_x <- trn_x[, vimp$feature[seq_len(s[k])]]
       tmp_f <- randomForest(tmp_x, trn_y, ntree = 200)
       beta[colnames(tmp_x)] <- as.numeric(importance(tmp_f))
-      out <- list('y_hat' = predict(tmp_f, newdata = tst_x), 'beta' = beta)
+      out <- list('y_hat' = predict(tmp_f, newdata = val_x), 
+                  'beta' = beta, 'rf' = tmp_f)
       return(out)
     }
     rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
@@ -125,10 +128,15 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
     betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
   }
   # Find best fit, export results
-  epsilon <- y_hat - tst_y
+  epsilon <- y_hat - val_y
   mse <- colMeans(epsilon^2)
-  out <- list('beta' = betas[, which.min(mse)], 
-               'eps' = epsilon[, which.min(mse)])
+  wts <- betas[, which.min(mse)]
+  if (f == 'rf') {
+    y_hat <- predict(rf_out[[which.min(mse)]]$rf, newdata = tst_x)
+  } else {
+    y_hat <- as.numeric(tst_x %*% wts)
+  }
+  out <- list('wts' = wts, 'eps' = y_hat - tst_y)
   return(out)
 }
 
@@ -143,12 +151,11 @@ f_fn <- function(trn_x, trn_y, tst_x, tst_y, f, d_z) {
 #' @param r2_y Proportion of variance explained in the DGP for Y.
 #' @param xzr X-to-Z ratio.
 #' @param form Functional form for structural equations.
-#' @param l Norm to use, either 0, 1, or 2.
 
-# Estimate causal directions by taking difference-in-differences between norms
-our_fn <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form, l) {
+# Estimate causal directions by comparing covariate-induced deactivations
+our_fn <- function(b, n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form) {
   # Simulate data
-  sim <- sim_dat(n, d_z, rho, sp, snr, xzr, form)
+  sim <- sim_dat(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form)
   dat <- sim$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
@@ -156,36 +163,96 @@ our_fn <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form, l) {
   # Split training and validation sets
   trn <- sample(n, round(0.8 * n))
   tst <- seq_len(n)[-trn]
-  # Compute coefficients
+  # Compute feature weights
   fit_fn <- function(h, f) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
-    betas <- list(
-      f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f, d_z)$beta,
-      f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)$beta,
-      f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)$beta,
-      f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f, d_z)$beta
+    wts <- cbind(
+      f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f, d_z)$wts,
+      f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)$wts,
+      f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)$wts,
+      f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f, d_z)$wts
     )
-    v <- sapply(seq_len(4), function(f_idx) {
-      switch(l, 'l0' = sum(betas[[f_idx]] != 0), 
-                'l1' = sum(abs(betas[[f_idx]])),
-                'l2' = sqrt(sum(betas[[f_idx]]^2)))
-    })
-    w0 <- v[1] - v[2]
-    w1 <- v[3] - v[4]
-    delta <- w0 - w1
+    w <- c(sum(wts[, 1] != 0 & wts[, 2] == 0),
+           sum(wts[, 3] != 0 & wts[, 4] == 0))
+    delta <- w[1] - w[2]
     # Export
     out <- data.table('h' = h, 'f' = f, 'delta' = delta)
     return(out)
   }
-  out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %:%
-    foreach(bb = c('lasso', 'step'), .combine = rbind) %do% 
-    fit_fn(h = aa, f = bb)
+  out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %do% 
+    fit_fn(h = aa, f = 'lasso')
   return(out)
 }
 res <- foreach(i = seq_len(500), .combine = rbind) %dopar% 
   our_fn(i, n = 500, d_z = 50, rho = 0.3, sp_x = 0.5, sp_y = 0.5, 
-         r2_x = 0.75, r2_y = 0.75, xzr = 1, form = 'linear', l = 'l0')
+         r2_x = 0.75, r2_y = 0.75, xzr = 1, form = 'linear')
+
+
+
+
+
+
+
+
+# Bootstrap p-values
+fn <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form, n_boot) {
+  # Simulate data
+  sim <- sim_dat(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, xzr, form)
+  dat <- sim$dat
+  boot_fn <- function(i) {
+    idx <- sample.int(n, replace = TRUE)
+    dat_b <- dat[idx, ]
+    z <- as.matrix(select(dat_b, starts_with('z')))
+    x <- dat_b$x
+    zx <- cbind(z, x)
+    # Split training and validation sets
+    trn <- sample(n, round(0.8 * n))
+    tst <- seq_len(n)[-trn]
+    # Compute feature weights
+    fit_fn <- function(h, f) {
+      if (h == 'h0') y <- dat_b$y0 else y <- dat_b$y1
+      zy <- cbind(z, y)
+      wts <- cbind(
+        f_fn(z[trn, ], y[trn], z[tst, ], y[tst], f, d_z)$wts,
+        f_fn(zx[trn, ], y[trn], zx[tst, ], y[tst], f, d_z)$wts,
+        f_fn(z[trn, ], x[trn], z[tst, ], x[tst], f, d_z)$wts,
+        f_fn(zy[trn, ], x[trn], zy[tst, ], x[tst], f, d_z)$wts
+      )
+      w <- c(sum(wts[, 1] != 0 & wts[, 2] == 0),
+             sum(wts[, 3] != 0 & wts[, 4] == 0))
+      delta <- w[1] - w[2]
+      # Export
+      out <- data.table('h' = h, 'f' = f, 'delta' = delta, 'xzr' = xzr)
+      return(out)
+    }
+    out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %do% 
+      fit_fn(h = aa, f = 'lasso')
+    return(out)
+  }
+  out <- foreach(bb = seq_len(n_boot), .combine = rbind) %do% boot_fn(bb)
+  return(out)
+}
+res <- foreach(xzrs = seq_len(4), .combine = rbind) %dopar%
+  fn(n = 500, d_z = 50, rho = 0.3, sp_x = 0.5, sp_y = 0.5, 
+     r2_x = 0.75, r2_y = 0.75, xzr = xzrs, form = 'linear', n_boot = 2000)
+
+
+
+  
+
+res[, sum(delta > 0), by = h]
+res[, sum(delta < 0), by = h]
+
+
+
+
+
+
+
+
+
+
 
 # Simplified Entner test: evaluate R1 and R2 per Z using sparse regression
 entner_fn <- function(b, n, d_z, rho, sp, snr, xzr, form, alpha) {
