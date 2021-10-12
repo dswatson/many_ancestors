@@ -11,17 +11,43 @@ res %>%
   facet_grid(h ~ f, scales = 'free') 
 
 # BAYES???
-gaussian_update <- function(x, mu0, sigma0, kappa0, nu0) {
+#' @param mu0 Prior mean.
+#' @param sigma0 Prior standard deviation.
+#' @param kappa0 Prior sample size for mu0.
+#' @param nu0 Prior degrees of freedom for sigma0.
+#' @param x Observed data
+#' 
+gaussian_update <- function(mu0, sigma0, kappa0, nu0, x) {
   n <- length(x)
-  xbar <- mean(x)
-  s <- sd(x)
-  mu1 <- weighted.mean(x = c(mu0, xbar), w = c(kappa0, n))
   kappa1 <- kappa0 + n
   nu1 <- nu0 + n
-  nu1sigma1 <- nu0 * sigma0^2 + (n - 1)*s^2 + 
-    ((kappa0 * n) / kappa1) * (xbar - mu0)^2
-  
+  # Posterior mean is just a weighted average
+  mu1 <- (kappa0 * mu0 + n * mean(x)) / kappa1
+  # Posterior variance combines prior sum of squares, sample sum of squares,
+  # and an extra term for uncertainty in the mean
+  prior_ss <- nu0 * sigma0^2
+  sample_ss <- (n - 1) * var(x)
+  mu_ss <- ((kappa0 * n) / kappa1) * (mean(x) - mu0)^2
+  sigma1 <- sqrt((prior_ss + sample_ss + mu_ss) / nu1)
+  out <- list('mu1' = mu1, 'sigma1' = sigma1, 'kappa1' = kappa1, 'nu1' = nu1)
+  return(out)
 }
+t_stat <- mu1 / sqrt(sigma1^2 / kappa1)
+posterior <- function(q) pt(q, df = nu1, ncp = t_stat)
+
+# kappa0 is like n_prior for the mean
+# nu0 is kind of like n_prior for the variance, I think?
+
+
+sigma1_sq <- (1 / nu1) * (nu0 * sigma0^2 + sum((x - mean(x))^2) + 
+                            (n * kappa0 * (mu0 - mean(x)^2)) / kappa1)
+
+
+# MCMC version
+s2 <- sigma1^2 / rchisq(n = 1e4, df = nu1)
+post_mu <- rnorm(n = 1e4, mean = mu1, sd = sqrt(s2))
+
+
 mu1 <- (n / (sigma_hat^2) + sigma0^(-2))^(-1) * 
   (n * mu_hat / (sigma_hat^2) + mu0 / (sigma0^2))
 sigma1 <- sqrt((n / (sigma_hat ^ 2) + sigma0 ^ (-2)) ^ (-1))
@@ -380,7 +406,6 @@ w_fn <- function(b, n, d_z, rho, snr, xzr) {
 }
 res <- foreach(i = seq_len(2000), .combine = rbind) %dopar% 
   w_fn(i, n = 1000, d_z = 100, rho = 0, snr = 5, xzr = 1)
-
 
 
 
