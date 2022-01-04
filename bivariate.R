@@ -107,22 +107,17 @@ f_fn <- function(x, y, trn, tst, d_z) {
 }
 
 
-#' @param sims Grid of simulation settings.
-#' @param s_idx Index for simulation setting.
+#' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param i Index for iteration of said setting.
 #' @param B Number of complementary pairs to draw for stability selection.
 
 # Compute (de)activation rates for X -> Y and Y -> X
-rate_fn <- function(sims, s_idx, i, B) {
-  # Simulate data
-  sdf <- sims[idx == s_idx]
-  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
-                 sp_x = sdf$sp, sp_y = sdf$sp, r2_x = sdf$r2, r2_y = sdf$r2, 
-                 wt_type = 'equal', xzr = 1, form = 'linear')
-  d_xy_true <- sim$wts$beta == 1 & sim$wts$gamma == 0
-  a_xy_true <- sim$wts$beta == 0 & sim$wts$gamma == 1
-  dat <- sim$dat
+rate_fn <- function(sim_obj, B) {
+  # Get data
+  dat <- sim_obj$dat
+  n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
   x <- dat$x
   zx <- cbind(z, x)
   # Compute feature weights
@@ -157,7 +152,7 @@ rate_fn <- function(sims, s_idx, i, B) {
     out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_z), h, 
                       d_xy = c(d_xy_i, d_xy_j), a_xy = c(a_xy_i, a_xy_j), 
                       d_yx = c(d_yx_i, d_yx_j), a_yx = c(a_yx_i, a_yx_j), 
-                      d_xy_true, a_xy_true, z = rep(seq_len(d_z), times = 2))
+                      z = rep(seq_len(d_z), times = 2))
     return(out)
   }
   out <- foreach(aa = c('h0', 'h1'), .combine = rbind) %:%
@@ -169,19 +164,15 @@ rate_fn <- function(sims, s_idx, i, B) {
   out[, dryx := sum(d_yx) / .N, by = .(h, z)]
   out[, aryx := sum(a_yx) / .N, by = .(h, z)]
   # Tidy up, export
-  out[, sim_idx := s_idx]
-  out[, idx := i]
-  out <- unique(out[, .(sim_idx, idx, h, z, 
-                        drxy, arxy, dryx, aryx, 
-                        d_xy_true, a_xy_true)])
+  out <- unique(out[, .(h, z, drxy, arxy, dryx, aryx)])
   return(out)
 }
 
 
 # Compute consistency lower bound
-lb_fn <- function(res, i, hyp) {
+lb_fn <- function(res, hyp, B) {
   # Subset the data
-  df <- res[idx == i & h == hyp, .(z, drxy, arxy, dryx, aryx)]
+  df <- res[h == hyp, .(z, drxy, arxy, dryx, aryx)]
   # Loop through thresholds
   lies <- function(tau) {
     # Internal consistency
@@ -198,32 +189,32 @@ lb_fn <- function(res, i, hyp) {
     # Export
     out <- data.table('tau' = tau, 'int_err' = int_err, 'ext_err' = ext_err)
   }
-  lie_df <- foreach(tt = seq(0.01, 1, 0.01), .combine = rbind) %do% 
+  lie_df <- foreach(tt = seq_len(2 * B) / (2 * B), .combine = rbind) %do% 
     lies(tt)
   # Compute minimal thresholds
   min_int <- lie_df[int_err == 0, min(tau)]
   min_ext <- lie_df[ext_err == 0, min(tau)]
   min_two <- lie_df[int_err == 0 & ext_err == 0, min(tau)] # It's always ext
   # Export
-  out <- data.table('idx' = i, 'h' = hyp, min_int, min_ext, min_two)
+  out <- data.table('h' = hyp, min_two)
   return(out)
 }
 
 
 # Infer causal direction using stability selection
-ss_fn <- function(res, i, hyp, order, rule, B) {
+ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
   # Subset the data
   if (order == 'xy' & rule == 'R1') {
-    r <- res[idx == i & h == hyp, drxy]
+    r <- res[h == hyp, drxy]
   } else if (order == 'xy' & rule == 'R2') {
-    r <- res[idx == i & h == hyp, arxy]
+    r <- res[h == hyp, arxy]
   } else if (order == 'yx' & rule == 'R1') {
-    r <- res[idx == i & h == hyp, dryx]
+    r <- res[h == hyp, dryx]
   } else if (order == 'yx' & rule == 'R2') {
-    r <- res[idx == i & h == hyp, aryx]
+    r <- res[h == hyp, aryx]
   }
   # Find consistency lower bound
-  lb <- cons_tbl[idx == i & h == hyp, min_two]
+  lb <- cons_tbl[h == hyp, min_two]
   # Stability selection parameters
   q <- sum(r)
   theta <- q / length(r)
@@ -238,39 +229,78 @@ ss_fn <- function(res, i, hyp, order, rule, B) {
     mutate(surplus = ifelse(detected > err_bound, 1, 0))
   # Export
   out <- data.table(
-    'idx' = i, 'h' = hyp, 'order' = order, 'rule' = rule, 
+    'h' = hyp, 'order' = order, 'rule' = rule, 
     'decision' = ifelse(sum(dat$surplus) > 0, 1, 0)
   )
   return(out)
 }
 
+
+# Big ol' wrapper
+big_loop <- function(sims_df, sim_id, i, B) {
+  # Simulate data, extract ground truth
+  sdf <- sims_df[s_id == sim_id]
+  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
+                 sp_x = sdf$sp, sp_y = sdf$sp, r2_x = sdf$r2, r2_y = sdf$r2, 
+                 wt_type = 'equal', xzr = 1, form = 'linear')
+  d_xy_true <- sim$wts$beta == 1 & sim$wts$gamma == 0
+  a_xy_true <- sim$wts$beta == 0 & sim$wts$gamma == 1
+  # Compute (de)activation rates for each z, h
+  res <- rate_fn(sim, B)
+  # Consistent lower bound
+  cons_tbl <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do%
+    lb_fn(res, hh, B)
+  # Stable upper bound
+  sum_tbl <- foreach(hh = c('h0', 'h1'), .combine = rbind) %:%
+    foreach(oo = c('xy', 'yx'), .combine = rbind) %:%
+    foreach(rr = c('R1', 'R2'), .combine = rbind) %do%
+    ss_fn(res, cons_tbl, hh, oo, rr, B)
+  # Export
+  sum_tbl[, s_id := sim_id]
+  sum_tbl[, idx := i]
+  return(sum_tbl)
+}
+
+
+### SIMULATION GRID ###
 # Simulation grid
-sims <- expand.grid(
-  n = c(500, 2000), d_z = c(50, 200), rho = c(0, 0.75),
-  sp = c(0.25, 0.75), r2 = c(1/3,  2/3)
-)
 sims <- expand.grid(
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
 )
-sims$idx <- seq_len(nrow(sims))
+sims$s_id <- seq_len(nrow(sims))
+sims <- as.data.table(sims)
+
+# Compute in parallel
+res <- foreach(ss = sims$s_id, .combine = rbind) %:%
+  foreach(ii = seq_len(100), .combine = rbind) %dopar%
+  big_loop(sims, ss, ii, B = 50)
+res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
+res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
 
 
-# Big wrapper
-big_loop <- function(iters, B) {
-  res <- foreach(ss = sims$idx, .combine = rbind) %:%
-    foreach(ii = seq_len(iters), .combine = rbind) %dopar% 
-    rate_fn(sims, ss, ii, B)
-  cons_tbl <- foreach(ii = seq_len(iters), .combine = rbind) %:%
-    foreach(hh = c('h0', 'h1'), .combine = rbind) %dopar%
-    lb_fn(res, ii, hh)
-  sum_tbl <- foreach(ii = seq_len(100), .combine = rbind) %:%
-    foreach(hh = c('h0', 'h1'), .combine = rbind) %:%
-    foreach(oo = c('xy', 'yx'), .combine = rbind) %:%
-    foreach(rr = c('R1', 'R2'), .combine = rbind) %dopar%
-    ss_fn(ii, hh, oo, rr, B = 50)
-  out <- sum_tbl[, sum(decision) / .N, by = .(h, order, rule)]
-}
+# Takes about 12 seconds to do one loop
+# Therefore 2.5 mns to do 100 reps of a single simulation setting
+# Over 10 hrs to do 243 settings
+
+
+# There's the per-z error rate (did this ancestor get properly diagnosed)
+# and the per-pair error rate (did this X-Y edge get properly diagnosed)
+
+
+# Plot results
+res[, hit := ifelse(h == 'h1' & order == 'xy', TRUE, FALSE)]
+res[, setting := paste(h, order, rule, sep = ',')]
+res[, setting := factor(setting, levels = c('h0,yx,R1', 'h0,yx,R2', 'h0,xy,R1', 'h0,xy,R2',
+                                            'h1,yx,R1', 'h1,yx,R2', 'h1,xy,R1', 'h1,xy,R2'))]
+ggplot(res[r2 == 1/3 & sp == 0.25 & rho == 0], 
+       aes(setting, hit_rate, color = hit)) + 
+  geom_bar(stat = 'identity') + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45)) + 
+  facet_grid(n ~ d_z)
+
+
 
 
 
