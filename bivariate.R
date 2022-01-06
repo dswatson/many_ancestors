@@ -1,7 +1,7 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
 # Set working directory
-setwd('./Documents/UCL/many_ancestors')
+setwd('./Documents/many_ancestors')
 
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
@@ -10,7 +10,7 @@ library(glmnet)
 library(randomForest)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -131,7 +131,10 @@ f_fn <- function(x, y, trn, tst, d_z, f) {
     rfe_loop <- function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
       tmp_f <- randomForest(tmp_x, y[trn], ntree = 100)
-      beta[colnames(tmp_x)] <- as.numeric(importance(tmp_f))
+      tmp_v <- data.frame('feature' = colnames(tmp_x), 
+                          'imp' = as.numeric(importance(tmp_f))) %>%
+        filter(grepl('z', feature))
+      beta[tmp_v$feature] <- tmp_v$imp
       out <- list('y_hat' = predict(tmp_f, newdata = x[tst, ]), 'beta' = beta)
       return(out)
     }
@@ -281,7 +284,7 @@ big_loop <- function(sims_df, sim_id, i, B) {
   sdf <- sims_df[s_id == sim_id]
   sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
                  sp_x = sdf$sp, sp_y = sdf$sp, r2_x = sdf$r2, r2_y = sdf$r2, 
-                 wt_type = 'equal', xzr = 1, form = 'linear')
+                 wt_type = 'equal', xzr = 1, form = 'nonlinear')
   d_xy_true <- sim$wts$beta == 1 & sim$wts$gamma == 0
   a_xy_true <- sim$wts$beta == 0 & sim$wts$gamma == 1
   # Compute (de)activation rates for each z, h
