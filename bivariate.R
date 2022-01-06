@@ -133,25 +133,19 @@ rate_fn <- function(sim_obj, B) {
     j_tst <- setdiff(j_set, j_trn)
     # Compute active sets
     s <- data.frame(
-      f_fn(z, y, i_trn, i_tst, d_z), f_fn(z, y, j_trn, j_tst, d_z), 
-      f_fn(zx, y, i_trn, i_tst, d_z), f_fn(zx, y, j_trn, j_tst, d_z),
-      f_fn(z, x, i_trn, i_tst, d_z), f_fn(z, x, j_trn, j_tst, d_z), 
-      f_fn(zy, x, i_trn, i_tst, d_z), f_fn(zy, x, j_trn, j_tst, d_z)
+      y0 = c(f_fn(z, y, i_trn, i_tst, d_z), f_fn(z, y, j_trn, j_tst, d_z)), 
+      y1 = c(f_fn(zx, y, i_trn, i_tst, d_z), f_fn(zx, y, j_trn, j_tst, d_z)),
+      x0 = c(f_fn(z, x, i_trn, i_tst, d_z), f_fn(z, x, j_trn, j_tst, d_z)), 
+      x1 = c(f_fn(zy, x, i_trn, i_tst, d_z), f_fn(zy, x, j_trn, j_tst, d_z))
     )
-    colnames(s) <- c('y0i', 'y0j', 'y1i', 'y1j', 'x0i', 'x0j', 'x1i', 'x1j')
     # Record (de)activations
-    d_xy_i <- s$y0i == 1 & s$y1i == 0
-    d_xy_j <- s$y0j == 1 & s$y1j == 0
-    a_xy_i <- s$x0i == 0 & s$x1i == 1
-    a_xy_j <- s$x0j == 0 & s$x1j == 1
-    a_yx_i <- s$y0i == 0 & s$y1i == 1
-    a_yx_j <- s$y0j == 0 & s$y1j == 1
-    d_yx_i <- s$x0i == 1 & s$x1i == 0
-    d_yx_j <- s$x0j == 1 & s$x1j == 0
+    d_xy <- s$y0 == 1 & s$y1 == 0
+    a_xy <- s$x0 == 0 & s$x1 == 1
+    a_yx <- s$y0 == 0 & s$y1 == 1
+    d_yx <- s$x0 == 1 & s$x1 == 0
     # Export
     out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_z), h, 
-                      d_xy = c(d_xy_i, d_xy_j), a_xy = c(a_xy_i, a_xy_j), 
-                      d_yx = c(d_yx_i, d_yx_j), a_yx = c(a_yx_i, a_yx_j), 
+                      d_xy, a_xy, a_yx, d_yx, 
                       z = rep(seq_len(d_z), times = 2))
     return(out)
   }
@@ -277,28 +271,63 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   big_loop(sims, ss, ii, B = 50)
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
 res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
+res <- merge(res, sim, by = 's_id')
 
-
-# Takes about 12 seconds to do one loop
-# Therefore 2.5 mns to do 100 reps of a single simulation setting
-# Over 10 hrs to do 243 settings
+# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
 
 
 # There's the per-z error rate (did this ancestor get properly diagnosed)
 # and the per-pair error rate (did this X-Y edge get properly diagnosed)
 
 
-# Plot results
+# Polish for plotting
 res[, hit := ifelse(h == 'h1' & order == 'xy', TRUE, FALSE)]
 res[, setting := paste(h, order, rule, sep = ',')]
 res[, setting := factor(setting, levels = c('h0,yx,R1', 'h0,yx,R2', 'h0,xy,R1', 'h0,xy,R2',
                                             'h1,yx,R1', 'h1,yx,R2', 'h1,xy,R1', 'h1,xy,R2'))]
-ggplot(res[r2 == 1/3 & sp == 0.25 & rho == 0], 
-       aes(setting, hit_rate, color = hit)) + 
-  geom_bar(stat = 'identity') + 
-  theme_bw() + 
-  theme(axis.text.x = element_text(angle = 45)) + 
-  facet_grid(n ~ d_z)
+res[, n := paste0('n=', n)]
+res[, n := factor(n, levels = c('n=500', 'n=1000', 'n=2000'))]
+res[, d_z := paste0('d=', d_z)]
+res[, d_z := factor(d_z, levels = c('d=50', 'd=100', 'd=200'))]
+plot_loop <- function(r, s, p) {
+  # Labels
+  if (r == 1/3) {
+    rlab <- 'lo' 
+  } else if (r == 1/2) {
+    rlab <- 'me'
+  } else if (r == 2/3) {
+    rlab <- 'hi'
+  }
+  if (s == 0.25) {
+    slab <- 'lo'
+  } else if (s == 0.5) {
+    slab <- 'me'
+  } else if (s == '0.75') {
+    slab <- 'hi'
+  }
+  if (p == 0) {
+    plab <- 'lo'
+  } else if (p == 0.25) {
+    plab <- 'me'
+  } else if (p == 0.75) {
+    plab <- 'hi'
+  }
+  # Plot
+  p <- ggplot(res[r2 == r & sp == s & rho == p], 
+              aes(setting, hit_rate, color = hit)) + 
+    geom_bar(stat = 'identity') + 
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 45)) + 
+    facet_grid(d_z ~ n)
+  # Export
+  ggsave(paste0('./plots/linear_bivariate_r2=', rlab, ',sp=', slab, 
+                ',rho=', plab, '.png'))
+}
+foreach(aa = c(1/3, 1/2, 2/3)) %:%
+  foreach(bb = c(0.25, 0.5, 0.75)) %:%
+  foreach(cc = c(0, 0.25, 0.75)) %do%
+  plot_loop(aa, bb, cc)
+
 
 
 
