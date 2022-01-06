@@ -103,7 +103,9 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
 
 # Precompute subset sizes for RFE
 subsets <- function(m, max_d, min_d, decay) {
-  unique(round(min_d + ((max_d - min_d) / m^decay) * seq_len(m)^decay))
+  out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
+  out <- unique(out)[seq_len(m)]
+  return(out)
 }
 
 
@@ -121,7 +123,7 @@ f_fn <- function(x, y, trn, tst, d_z, f) {
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
     betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
   } else if (f == 'rf') {
-    fit <- randomForest(x[trn, ], y[trn], ntree = 500)
+    fit <- randomForest(x[trn, ], y[trn], ntree = 200)
     vimp <- data.frame('feature' = colnames(x), 
                        'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
@@ -130,7 +132,7 @@ f_fn <- function(x, y, trn, tst, d_z, f) {
     s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
     rfe_loop <- function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- randomForest(tmp_x, y[trn], ntree = 100)
+      tmp_f <- randomForest(tmp_x, y[trn], ntree = 50)
       tmp_v <- data.frame('feature' = colnames(tmp_x), 
                           'imp' = as.numeric(importance(tmp_f))) %>%
         filter(grepl('z', feature))
@@ -305,10 +307,18 @@ big_loop <- function(sims_df, sim_id, i, B) {
 
 
 ### SIMULATION GRID ###
-# Simulation grid
+# Simulation grid (linear)
 sims <- expand.grid(
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
+)
+sims$s_id <- seq_len(nrow(sims))
+sims <- as.data.table(sims)
+
+# Simulation grid (nonlinear)
+sims <- expand.grid(
+  n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
+  rho = 0, r2 = 2/3
 )
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
@@ -320,6 +330,8 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
 res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
 res <- merge(res, sim, by = 's_id')
+fwrite(res, 'nonlinear_sim.csv')
+
 
 # Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
 
