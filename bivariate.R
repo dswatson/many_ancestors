@@ -42,7 +42,7 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
     zz <- z
     zz[, idx$sq] <- z[, idx$sq]^2
     zz[, idx$sqrt] <- sqrt(abs(z[, idx$sqrt]))
-    zz[, idx$sftpls] <- log(1 + exp(z[, idx$lexp]))
+    zz[, idx$sftpls] <- log(1 + exp(z[, idx$sftpls]))
     zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
   }
   # Set weights
@@ -90,7 +90,7 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
     'wts' = list('beta' = beta, 'gamma' = gamma, 'alpha' = alpha), 
-    params
+    'params' = params
   )
   return(out)
 }
