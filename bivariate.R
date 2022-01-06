@@ -7,6 +7,7 @@ setwd('./Documents/UCL/many_ancestors')
 source('shah_ss.R')
 library(data.table)
 library(glmnet)
+library(randomForest)
 library(tidyverse)
 library(doMC)
 registerDoMC(8)
@@ -81,24 +82,63 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
   signal_y <- signal_z_to_y + x * alpha
   y1 <- signal_y + sim_noise(signal_y, r2_y)
   # Export
+  params <- list(
+    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp_x' = sp_x, 'sp_y' = sp_y, 
+    'r2_x' = r2_x, 'r2_y' = r2_y, 'wt_type' = wt_type, 'xzr' = xzr, 
+    'form' = form
+  )
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
-    'wts' = list('beta' = beta, 'gamma' = gamma, 'alpha' = alpha)
+    'wts' = list('beta' = beta, 'gamma' = gamma, 'alpha' = alpha), 
+    params
   )
   return(out)
 }
+
+
+#' @param m Number of nested models to fit.
+#' @param max_x Number of predictors in largest model.
+#' @param min_d Number of predictors in smallest model.
+#' @param decay Exponential decay parameter
+
+# Precompute subset sizes for RFE
+subsets <- function(m, max_d, min_d, decay) {
+  unique(round(min_d + ((max_d - min_d) / m^decay) * seq_len(m)^decay))
+}
+
 
 #' @param x Design matrix.
 #' @param y Outcome vector.
 #' @param trn Training indices.
 #' @param tst Test indices.
 #' @param d_z Dimensionality of ancestor set Z.
+#' @param f Regression method, either \code{"lasso"} or \code{"rf"}.
  
 # Fit regressions, return bit vector for feature selection
-f_fn <- function(x, y, trn, tst, d_z) {
-  fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
-  y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
-  betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
+f_fn <- function(x, y, trn, tst, d_z, f) {
+  if (f == 'lasso') {
+    fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
+    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
+    betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
+  } else if (f == 'rf') {
+    fit <- randomForest(x[trn, ], y[trn], ntree = 500)
+    vimp <- data.frame('feature' = colnames(x), 
+                       'imp' = as.numeric(importance(fit))) %>%
+      arrange(desc(imp))
+    beta <- double(length = d_z)
+    names(beta) <- paste0('z', seq_len(d_z))
+    s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
+    rfe_loop <- function(k) {
+      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
+      tmp_f <- randomForest(tmp_x, y[trn], ntree = 100)
+      beta[colnames(tmp_x)] <- as.numeric(importance(tmp_f))
+      out <- list('y_hat' = predict(tmp_f, newdata = x[tst, ]), 'beta' = beta)
+      return(out)
+    }
+    rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
+    y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
+    betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
+  }
   epsilon <- y_hat - y[tst]
   mse <- colMeans(epsilon^2)
   betas <- betas[, which.min(mse)]
@@ -108,7 +148,6 @@ f_fn <- function(x, y, trn, tst, d_z) {
 
 
 #' @param sim_obj Simulation object output by \code{sim_dat}.
-#' @param i Index for iteration of said setting.
 #' @param B Number of complementary pairs to draw for stability selection.
 
 # Compute (de)activation rates for X -> Y and Y -> X
@@ -120,6 +159,12 @@ rate_fn <- function(sim_obj, B) {
   d_z <- ncol(z)
   x <- dat$x
   zx <- cbind(z, x)
+  # Linear or nonlinear?
+  if (sim_obj$params$form == 'linear') {
+    f <- 'lasso'
+  } else {
+    f <- 'rf'
+  }
   # Compute feature weights
   fit_fn <- function(b, h) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
@@ -133,10 +178,10 @@ rate_fn <- function(sim_obj, B) {
     j_tst <- setdiff(j_set, j_trn)
     # Compute active sets
     s <- data.frame(
-      y0 = c(f_fn(z, y, i_trn, i_tst, d_z), f_fn(z, y, j_trn, j_tst, d_z)), 
-      y1 = c(f_fn(zx, y, i_trn, i_tst, d_z), f_fn(zx, y, j_trn, j_tst, d_z)),
-      x0 = c(f_fn(z, x, i_trn, i_tst, d_z), f_fn(z, x, j_trn, j_tst, d_z)), 
-      x1 = c(f_fn(zy, x, i_trn, i_tst, d_z), f_fn(zy, x, j_trn, j_tst, d_z))
+      y0 = c(f_fn(z, y, i_trn, i_tst, d_z, f), f_fn(z, y, j_trn, j_tst, d_z, f)), 
+      y1 = c(f_fn(zx, y, i_trn, i_tst, d_z, f), f_fn(zx, y, j_trn, j_tst, d_z, f)),
+      x0 = c(f_fn(z, x, i_trn, i_tst, d_z, f), f_fn(z, x, j_trn, j_tst, d_z, f)), 
+      x1 = c(f_fn(zy, x, i_trn, i_tst, d_z, f), f_fn(zy, x, j_trn, j_tst, d_z, f))
     )
     # Record (de)activations
     d_xy <- s$y0 == 1 & s$y1 == 0
