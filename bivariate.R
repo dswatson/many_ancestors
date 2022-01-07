@@ -104,7 +104,7 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
 # Precompute subset sizes for RFE
 subsets <- function(m, max_d, min_d, decay) {
   out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
-  out <- unique(out)[seq_len(m)]
+  out <- na.omit(unique(out)[seq_len(m)])
   return(out)
 }
 
@@ -142,7 +142,9 @@ f_fn <- function(x, y, trn, tst, d_z, f) {
     }
     rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
     y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
+    y_hat <- cbind(y_hat, predict(fit, newdata = x[tst, ]))
     betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
+    betas <- cbind(betas, as.numeric(importance(fit))[seq_len(d_z)])
   }
   epsilon <- y_hat - y[tst]
   mse <- colMeans(epsilon^2)
@@ -323,6 +325,11 @@ sims <- expand.grid(
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
 
+# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
+library(microbenchmark)
+a <- microbenchmark(b = big_loop(sims, 4, 1, 50), times = 10)
+
+
 # Compute in parallel
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
@@ -333,7 +340,6 @@ res <- merge(res, sim, by = 's_id')
 fwrite(res, 'nonlinear_sim.csv')
 
 
-# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
 
 
 # There's the per-z error rate (did this ancestor get properly diagnosed)
