@@ -1,7 +1,7 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
 # Set working directory
-setwd('./Documents/many_ancestors')
+setwd('./Documents/UCL/many_ancestors')
 
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
@@ -10,7 +10,7 @@ library(glmnet)
 library(randomForest)
 library(tidyverse)
 library(doMC)
-registerDoMC(16)
+registerDoMC(8)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -18,52 +18,41 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
 #' @param rho Auto-correlation of the Toeplitz matrix for Z.
-#' @param sp_x Proportion of zero weights from Z to X. 
-#' @param sp_y Proportion of zero weights from Z to Y.
-#' @param r2_x Proportion of variance explained in the DGP for X.
-#' @param r2_y Proportion of variance explained in the DGP for Y.
-#' @param wt_type Type of weight, either \code{"equal"} or \code{"unequal"}.
-#' @param xzr Ratio of X-signal to Z-signal when X -> Y.
-#' @param form Should edges from Z encode \code{"linear"} or \code{"nonlinear"}
-#'   structural equations?
+#' @param sp Sparsity of the connections from background to foreground.
+#' @param r2 Proportion of variance explained by endogenous features.
+#' @param lin_pr Probability that an edge denotes a linear relationship.
 
 # Data simulation function
-sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
+sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
   var_z <- 1 / d_z
   Sigma <- toeplitz(rho^(0:(d_z - 1))) * var_z
   z <- z %*% chol(Sigma)
   colnames(z) <- paste0('z', seq_len(d_z))
+  # Set weights
+  beta <- gamma <- double(length = d_z)
+  k <- round((1 - sp) * d_z)
+  beta[sample(d_z, k)] <- sample(c(1, -1), k, replace = TRUE)
+  gamma[sample(d_z, k)] <- sample(c(1, -1), k, replace = TRUE)
   # Nonlinear transformations?
-  if (form == 'nonlinear') {
-    idx <- split(sample.int(d_z), sort(seq_len(d_z) %% 5))
-    names(idx) <- c('sq', 'sqrt', 'sftpls', 'relu', 'orig')
-    zz <- z
+  if (lin_pr < 1) {
+    z_out <- zz <- z
+    # Create matrix zz of random nonlinear transformations
+    idx <- split(sample.int(d_z), sort(seq_len(d_z) %% 4))
+    names(idx) <- c('sq', 'sqrt', 'sftpls', 'relu')
     zz[, idx$sq] <- z[, idx$sq]^2
     zz[, idx$sqrt] <- sqrt(abs(z[, idx$sqrt]))
     zz[, idx$sftpls] <- log(1 + exp(z[, idx$sftpls]))
     zz[, idx$relu] <- ifelse(z[, idx$relu] > 0, z[, idx$relu], 0)
-  }
-  # Set weights
-  beta <- gamma <- double(length = d_z)
-  k <- round((1 - sp_x) * d_z)
-  if (wt_type == 'equal') {
-    beta[sample(d_z, k)] <- 1
-    gamma[sample(d_z, k)] <- 1
-  } else if (wt_type == 'unequal') {
-    beta[sample(d_z, k)] <- seq(from = 1, to = 10, length.out = k)
-    gamma[sample(d_z, k)] <- seq(from = 1, to = 10, length.out = k)
-  }
-  # Random signs
-  beta <- beta * sample(c(1, -1), d_z, replace = TRUE)
-  gamma <- gamma * sample(c(1, -1), d_z, replace = TRUE)
-  if (form == 'linear') {
+    # Sample columns from zz with probability 1 - lin_pr
+    nonlin_idx <- sample.int(d_z, d_z * (1 - lin_pr))
+    z_out[, nonlin_idx] <- zz[, nonlin_idx]
+    signal_x <- as.numeric(z_out %*% beta)
+    signal_y <- as.numeric(z_out %*% gamma)
+  } else {
     signal_x <- as.numeric(z %*% beta)
     signal_y <- as.numeric(z %*% gamma)
-  } else {
-    signal_x <- as.numeric(zz %*% beta)
-    signal_y <- as.numeric(zz %*% gamma)
   }
   # Generate noise
   sim_noise <- function(signal, r2) {
@@ -73,24 +62,19 @@ sim_dat <- function(n, d_z, rho, sp_x, sp_y, r2_x, r2_y, wt_type, xzr, form) {
     return(noise)
   }
   ### Null scenario: X \indep Y | Z
-  x <- signal_x + sim_noise(signal_x, r2_x)
-  y0 <- signal_y + sim_noise(signal_y, r2_y)
+  x <- signal_x + sim_noise(signal_x, r2)
+  y0 <- signal_y + sim_noise(signal_y, r2)
   ### Alternative scenario: X -> Y
-  signal_z_to_y <- signal_y
-  sigma_xy <- sqrt(xzr * var(signal_z_to_y))
-  alpha <- sigma_xy / sd(x)
-  signal_y <- signal_z_to_y + x * alpha
-  y1 <- signal_y + sim_noise(signal_y, r2_y)
+  gamma_x <- sample(c(1, -1), size = 1)
+  signal_y <- signal_y + x * gamma_x
+  y1 <- signal_y + sim_noise(signal_y, r2)
   # Export
   params <- list(
-    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp_x' = sp_x, 'sp_y' = sp_y, 
-    'r2_x' = r2_x, 'r2_y' = r2_y, 'wt_type' = wt_type, 'xzr' = xzr, 
-    'form' = form
+    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr
   )
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
-    'wts' = list('beta' = beta, 'gamma' = gamma, 'alpha' = alpha), 
-    'params' = params
+    'wts' = list('beta' = beta, 'gamma' = gamma), 'params' = params
   )
   return(out)
 }
@@ -116,8 +100,8 @@ subsets <- function(m, max_d, min_d, decay) {
 #' @param d_z Dimensionality of ancestor set Z.
 #' @param f Regression method, either \code{"lasso"} or \code{"rf"}.
  
-# Fit regressions, return bit vector for feature selection
-f_fn <- function(x, y, trn, tst, d_z, f) {
+# Fit regressions, return bit vector for feature selection.
+l0 <- function(x, y, trn, tst, d_z, f) {
   if (f == 'lasso') {
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
@@ -167,13 +151,9 @@ rate_fn <- function(sim_obj, B) {
   x <- dat$x
   zx <- cbind(z, x)
   # Linear or nonlinear?
-  if (sim_obj$params$form == 'linear') {
-    f <- 'lasso'
-  } else {
-    f <- 'rf'
-  }
+  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
   # Compute feature weights
-  fit_fn <- function(b, h) {
+  fit_fn <- function(h, b) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
     # Take complementary subsets
@@ -185,19 +165,19 @@ rate_fn <- function(sim_obj, B) {
     j_tst <- setdiff(j_set, j_trn)
     # Compute active sets
     s <- data.frame(
-      y0 = c(f_fn(z, y, i_trn, i_tst, d_z, f), f_fn(z, y, j_trn, j_tst, d_z, f)), 
-      y1 = c(f_fn(zx, y, i_trn, i_tst, d_z, f), f_fn(zx, y, j_trn, j_tst, d_z, f)),
-      x0 = c(f_fn(z, x, i_trn, i_tst, d_z, f), f_fn(z, x, j_trn, j_tst, d_z, f)), 
-      x1 = c(f_fn(zy, x, i_trn, i_tst, d_z, f), f_fn(zy, x, j_trn, j_tst, d_z, f))
+      y0 = c(l0(z, y, i_trn, i_tst, d_z, f), l0(z, y, j_trn, j_tst, d_z, f)), 
+      y1 = c(l0(zx, y, i_trn, i_tst, d_z, f), l0(zx, y, j_trn, j_tst, d_z, f)),
+      x0 = c(l0(z, x, i_trn, i_tst, d_z, f), l0(z, x, j_trn, j_tst, d_z, f)), 
+      x1 = c(l0(zy, x, i_trn, i_tst, d_z, f), l0(zy, x, j_trn, j_tst, d_z, f))
     )
     # Record (de)activations
     d_xy <- s$y0 == 1 & s$y1 == 0
     a_xy <- s$x0 == 0 & s$x1 == 1
-    a_yx <- s$y0 == 0 & s$y1 == 1
     d_yx <- s$x0 == 1 & s$x1 == 0
+    a_yx <- s$y0 == 0 & s$y1 == 1
     # Export
     out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_z), h, 
-                      d_xy, a_xy, a_yx, d_yx, 
+                      d_xy, a_xy, d_yx, a_yx,
                       z = rep(seq_len(d_z), times = 2))
     return(out)
   }
@@ -287,8 +267,7 @@ big_loop <- function(sims_df, sim_id, i, B) {
   # Simulate data, extract ground truth
   sdf <- sims_df[s_id == sim_id]
   sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
-                 sp_x = sdf$sp, sp_y = sdf$sp, r2_x = sdf$r2, r2_y = sdf$r2, 
-                 wt_type = 'equal', xzr = 1, form = 'nonlinear')
+                 sp = sdf$sp, r2 = sdf$r2, lin_pr = sdf$lin_pr)
   d_xy_true <- sim$wts$beta == 1 & sim$wts$gamma == 0
   a_xy_true <- sim$wts$beta == 0 & sim$wts$gamma == 1
   # Compute (de)activation rates for each z, h
@@ -314,9 +293,6 @@ sims <- expand.grid(
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
 )
-sims$s_id <- seq_len(nrow(sims))
-sims <- as.data.table(sims)
-
 # Simulation grid (nonlinear)
 sims <- expand.grid(
   n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
@@ -336,14 +312,8 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   big_loop(sims, ss, ii, B = 50)
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
 res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
-res <- merge(res, sim, by = 's_id')
+res <- merge(res, sims, by = 's_id')
 fwrite(res, 'nonlinear_sim.csv')
-
-
-
-
-# There's the per-z error rate (did this ancestor get properly diagnosed)
-# and the per-pair error rate (did this X-Y edge get properly diagnosed)
 
 
 # Polish for plotting
