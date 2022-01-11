@@ -1,7 +1,7 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
 # Set working directory
-setwd('./Documents/UCL/many_ancestors')
+setwd('./Documents/many_ancestors')
 
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
@@ -10,7 +10,7 @@ library(glmnet)
 library(randomForest)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -106,6 +106,10 @@ l0 <- function(x, y, trn, tst, d_z, f) {
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
     betas <- coef(fit, s = fit$lambda)[2:(d_z + 1), ]
+  } else if (f == 'step') {
+    fit <- fs(x[trn, ], y[trn], intercept = FALSE, verbose = FALSE)
+    y_hat <- predict(fit, newx = x[tst, ])
+    betas <- coef(fit)[1:d_z, ]
   } else if (f == 'rf') {
     fit <- randomForest(x[trn, ], y[trn], ntree = 200)
     vimp <- data.frame('feature' = colnames(x), 
