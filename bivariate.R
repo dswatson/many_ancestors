@@ -290,20 +290,21 @@ big_loop <- function(sims_df, sim_id, i, B) {
 ### SIMULATION GRID ###
 # Simulation grid (linear)
 sims <- expand.grid(
-  n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
+  n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.5),
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
 )
-# Simulation grid (nonlinear)
-sims <- expand.grid(
-  n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
-  rho = 0, r2 = 2/3
-)
+sims$lin_pr <- 1
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
 
 # Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
 library(microbenchmark)
 a <- microbenchmark(b = big_loop(sims, 4, 1, 50), times = 10)
+# Simulation grid (nonlinear)
+sims <- expand.grid(
+  n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
+  rho = 0, r2 = 2/3
+)
 
 
 # Compute in parallel
@@ -313,6 +314,9 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
 res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
 res <- merge(res, sims, by = 's_id')
+fwrite(res, 'linear_sim.csv')
+
+
 fwrite(res, 'nonlinear_sim.csv')
 
 
@@ -343,9 +347,7 @@ plot_loop <- function(r, s, p) {
   }
   if (p == 0) {
     plab <- 'lo'
-  } else if (p == 0.25) {
-    plab <- 'me'
-  } else if (p == 0.75) {
+  } else if (p == 0.5) {
     plab <- 'hi'
   }
   # Plot
@@ -361,7 +363,7 @@ plot_loop <- function(r, s, p) {
 }
 foreach(aa = c(1/3, 1/2, 2/3)) %:%
   foreach(bb = c(0.25, 0.5, 0.75)) %:%
-  foreach(cc = c(0, 0.25, 0.75)) %do%
+  foreach(cc = c(0, 0.5)) %do%
   plot_loop(aa, bb, cc)
 
 
