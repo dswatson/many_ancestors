@@ -1,5 +1,21 @@
 
 
+
+# Test hypothesis that error inflation on aryx for dense graphs is a function
+# of xzr:
+sims <- expand.grid(n = 500, d_z = 50, rho = 0, sp = 0.25, r2 = 2/3, 
+                    xzr = c(0.1, 0.25, 0.5, 0.75, 1), lin_pr = 1)
+sims$s_id <- seq_len(nrow(sims))
+sims <- as.data.table(sims)
+
+# More extremely, we could say: each of X and Y have the *same* proportion of 
+# variance explained by Z, but when X -> Y, Y's noise is smaller than X's
+# as the remainder of its variance is split between X signal and noise
+
+
+# There's the per-z error rate (did this ancestor get properly diagnosed)
+# and the per-pair error rate (did this X-Y edge get properly diagnosed)
+
 #Plot
 res %>%
   pivot_longer(cols = c(entner, ours), 
