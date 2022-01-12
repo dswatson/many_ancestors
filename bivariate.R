@@ -26,7 +26,7 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
-  var_z <- 1 / d_z
+  var_z <- 1 / d_z # Does this make a difference?
   Sigma <- toeplitz(rho^(0:(d_z - 1))) * var_z
   z <- z %*% chol(Sigma)
   colnames(z) <- paste0('z', seq_len(d_z))
@@ -65,8 +65,11 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
   x <- signal_x + sim_noise(signal_x, r2)
   y0 <- signal_y + sim_noise(signal_y, r2)
   ### Alternative scenario: X -> Y
-  gamma_x <- sample(c(1, -1), size = 1)
-  signal_y <- signal_y + x * gamma_x
+  signal_z_to_y <- signal_y
+  xzr <- 1 / (k + 1)
+  sigma_xy <- sqrt(xzr * var(signal_z_to_y))
+  gamma_x <- sigma_xy / sd(x)
+  signal_y <- signal_z_to_y + x * gamma_x
   y1 <- signal_y + sim_noise(signal_y, r2)
   # Export
   params <- list(
@@ -295,12 +298,12 @@ big_loop <- function(sims_df, sim_id, i, B) {
 # Simulation grid (linear)
 sims <- expand.grid(
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
-  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
+  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3), lin_pr = 1
 )
 # Simulation grid (nonlinear)
 sims <- expand.grid(
   n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
-  rho = 0, r2 = 2/3
+  rho = 0, r2 = 2/3, lin_pr = 1/5
 )
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
