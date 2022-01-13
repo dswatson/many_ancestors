@@ -89,19 +89,19 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
     # Compute Z signal with Rademacher weights
     pa_z <- prep(z[, z_idx[g %in% pa, z]], lin_pr)
     beta_z <- sample(c(1, -1), size = ncol(pa_z), replace = TRUE)
-    signal_zxj <- as.numeric(pa_z %*% beta_z)
+    signal_z <- as.numeric(pa_z %*% beta_z)
     # Compute X signal, if applicable
-    pa_x <- prep(x[, x_idx[g %in% pa, x]], lin_pr)
-    if (ncol(pa_x) >= 1) {
-      adj_mat[x_idx[g %in% pa, x], j] <- 1
+    if (any(x_idx$g %in% pa)) {
+      pa_x <- as.matrix(prep(x[, x_idx[g %in% pa, x]], lin_pr))
+      adj_mat[j, x_idx[g %in% pa, x]] <- 1
       causal_wt <- 1 / length(pa)
-      sigma_xij <- sqrt(causal_wt * var(signal_zxj))
+      sigma_xij <- sqrt(causal_wt * var(signal_z))
       beta_x <- sigma_xij / colSds(pa_x)
-      signal_xij <- as.numeric(pa_x %*% beta_x)
+      signal_x <- as.numeric(pa_x %*% beta_x)
     } else {
-      signal_xij <- 0
+      signal_x <- 0
     }
-    signal_xj <- signal_zxj + signal_xij
+    signal_xj <- signal_z + signal_x
     # Add appropriate noise and export
     x[, j] <- signal_xj + sim_noise(signal_xj, r2)
   }
@@ -113,6 +113,7 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
   out <- list('dat' = data.table(z, x), 'adj_mat' = adj_mat, 'params' = params)
   return(out)
 }
+# Note: lower triangular adj_mat means that column is a parent of row
 
 #' @param m Number of nested models to fit.
 #' @param max_x Number of predictors in largest model.
@@ -184,8 +185,12 @@ rate_fn <- function(sim_obj, B) {
   d_z <- ncol(z)
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
+  xlabs <- paste0('x', seq_len(d_x))
   # Linear or nonlinear?
   f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
+  # Initialize adjacency matrix
+  adj_mat <- matrix(NA_character_, nrow = d_x, ncol = d_x, 
+                    dimnames = list(x_labs, x_labs))
   
   ### LOOP THROUGH ROUNDS ###
   t_loop <- function(...) {
@@ -208,7 +213,7 @@ rate_fn <- function(sim_obj, B) {
       colnames(m) <- paste0('x', seq_len(d_x)[-i])
       return(m)
     })
-    # Apply them rules
+    # Apply rules: count instances of R1-R3 for all pairs
     out <- expand.grid(c = seq_len(d_x), e = seq_len(d_x), 
                        r1 = 0, r2 = 0, r3 = 0)
     out <- as.data.table(out)
@@ -224,8 +229,24 @@ rate_fn <- function(sim_obj, B) {
               (s1_list[[j]][d_z + 1, paste0('x', i)] == 0)]
       }
     }
-    # I say: if r3 > 0, it's i ~ j
-    # Otherwise, max(c(r1, r2)) unless it's goose eggs across the board
+    # Now compare results for i \preceq j and j \preceq i
+    # Heuristic: if r3 > 0, i ~ j. 
+    # Otherwise, max(c(r1, r2)) in either direction
+    # If nothing applies, then we admit our ignorance
+    for (i in 2:d_x) {
+      for (j in 1:(i - 1)) {
+        tmp <- out[c %in% c(i, j) & e %in% c(i, j)]
+        if (tmp[, sum(r3) > 0]) {
+          adj_mat[i, j] <- '0'
+        } else if (tmp[, max(r1)] > tmp[, max(r2)]) {
+          adj_mat[tmp[which.max(r1), e], tmp[which.max(r1), c]] <- 'prec'
+        } else if (tmp[, max(r2)] > tmp[, max(r1)]) {
+          adj_mat[tmp[which.max(r2), e], tmp[which.max(r2), c]] <- 'preceq'
+        }
+      }
+    }
+    iter <- iter + 1
+    
     # Need some way to update and loop back
     
     
@@ -239,6 +260,101 @@ rate_fn <- function(sim_obj, B) {
 
 
 
+subdag <- function(sim_obj, maxiter) {
+  ### PRELIMINARIES ###
+  # Get data
+  dat <- sim_obj$dat
+  n <- nrow(dat)
+  z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
+  x <- as.matrix(select(dat, starts_with('x')))
+  d_x <- ncol(x)
+  xlabs <- paste0('x', seq_len(d_x))
+  # Linear or nonlinear?
+  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
+  # Initialize adjacency matrix
+  adj_list <- list(
+    matrix(NA_character_, nrow = d_x, ncol = d_x, 
+           dimnames = list(x_labs, x_labs))
+  )
+  # Stopping parameters
+  converge <- FALSE
+  iter <- 0
+  ### LOOP IT ###
+  while(converge == FALSE & iter <= maxiter) {
+    # Extract relevant adjacency matrices
+    if (iter == 0) {
+      adj0 <- adj1 <- adj_list[[1]]
+    } else {
+      adj0 <- adj_list[[iter - 1]]
+      adj1 <- adj_list[[iter]]
+    }
+    for (i in 2:d_x) {
+      for (j in 1:(i - 1)) {
+        # Only continue if the relationship is unknown
+        if (is.na(adj1[i, j]) & is.na(adj1[j, i])) {
+          # Only continue if the set of nondescendants has increased since last 
+          # iteration (i.e., have we learned anything new?)
+          preceq_i <- which(grepl('prec', adj0[i, ]))
+          preceq_j <- which(grepl('prec', adj0[j, ]))
+          a0 <- intersect(preceq_i, preceq_j) 
+          preceq_i <- which(grepl('prec', adj1[i, ]))
+          preceq_j <- which(grepl('prec', adj1[j, ]))
+          a1 <- intersect(preceq_i, preceq_j) 
+          if (length(a1) > length(a0)) {
+            z_t <- cbind(z, x[, a])
+            d_zt <- ncol(z_t)
+            # Fit reduced models
+            s0 <- sapply(c(i, j), function(k) {
+              l0(z_t, x[, k], trn, tst, f)
+            })
+            # Fit expanded models
+            s1 <- sapply(c(i, j), function(k) {
+              not_k <- setdiff(c(i, j), k)
+              l0(cbind(z_t, x[, not_k]), x[, k], trn, tst, f)
+            })
+            # Apply rules
+            if (any(s1[d_zt + 1, ] == 0)) {
+              # If either Xi or Xj receives zero weight in the other's regression,
+              # we stop there
+              adj1[i, j] <- adj1[j, i] <- '0'
+            } else {
+              # Sum (de)activations across all nondescendants
+              d_ji <- sum(s0[, 1] == 1 & s1[, 1] == 0)
+              a_ji <- sum(s0[, 2] == 0 & s1[, 2] == 1)
+              d_ij <- sum(s0[, 2] == 1 & s1[, 2] == 0)
+              a_ij <- sum(s0[, 1] == 0 & s1[, 1] == 1)
+              events <- c(d_ji, a_ji, d_ij, a_ij)
+              # Heuristic: go with the max
+              if (sum(events) > 0) {
+                if (d_ji > max(events[-1])) {
+                  adj1[j, i] <- 'prec'
+                } else if (a_ji > max(events[-2]) | 
+                           min(c(d_ji, a_ji)) > max(d_ij, a_ij)) {
+                  adj1[j, i] <- 'preceq'
+                } else if (d_ij > max(events[-3])) {
+                  adj1[i, j] <- 'prec'
+                } else if (a_ij > max(events[-4]) | 
+                           min(c(d_ij, a_ij)) > max(d_ji, a_ji)) {
+                  adj1[i, j] <- 'preceq'
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    # Store that iteration's adjacency matrix
+    iter <- iter + 1
+    adj_list <- append(adj_list, list(adj1))
+    adj0 <- adj_list[[iter - 1]]
+    adj1 <- adj_list[[iter]]
+    # Check for convergence
+    if (identical(adj0, adj1)) {
+      converge <- TRUE
+    }
+  }
+}
 
 
 
