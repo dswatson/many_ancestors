@@ -173,12 +173,11 @@ l0 <- function(x, y, trn, tst, f) {
 
 
 #' @param sim_obj Simulation object output by \code{sim_dat}.
-#' @param B Number of complementary pairs to draw for stability selection.
+#' @param maxiter Maximum number of iterations to loop through.
 
-# Compute (de)activation rates
-rate_fn <- function(sim_obj, B) {
+subdag <- function(sim_obj, maxiter = 100) {
   ### PRELIMINARIES ###
-  # Get data
+  # Get data, hyperparameters, train/test split
   dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
@@ -186,98 +185,14 @@ rate_fn <- function(sim_obj, B) {
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
   xlabs <- paste0('x', seq_len(d_x))
-  # Linear or nonlinear?
   f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
-  # Initialize adjacency matrix
-  adj_mat <- matrix(NA_character_, nrow = d_x, ncol = d_x, 
-                    dimnames = list(x_labs, x_labs))
-  
-  ### LOOP THROUGH ROUNDS ###
-  t_loop <- function(...) {
-    # Update dimensionality
-    d_z <- ncol(z_plus)
-    d_x <- ncol(x_minus)
-    # Random train/test split
-    trn <- sample(n, round(0.8 * n))
-    tst <- seq_len(n)[-trn]
-    # Fit reduced models: d_z x d_x matrix
-    s0_mat <- sapply(seq_len(d_x), function(i) {
-      l0(z, x[, i], trn, tst, f)
-    })
-    # Fit expanded models: list of length d_x, 
-    # each element a (d_z + 1) x (d_x - 1) matrix
-    s1_list <- lapply(seq_len(d_x), function(i) {
-      m <- sapply(seq_len(d_x)[-i], function(j) {
-        l0(cbind(z, x[, j]), x[, i], trn, tst, f)
-      })
-      colnames(m) <- paste0('x', seq_len(d_x)[-i])
-      return(m)
-    })
-    # Apply rules: count instances of R1-R3 for all pairs
-    out <- expand.grid(c = seq_len(d_x), e = seq_len(d_x), 
-                       r1 = 0, r2 = 0, r3 = 0)
-    out <- as.data.table(out)
-    out <- out[c != e]
-    for (i in seq_len(d_x)) {
-      for (j in seq_len(d_x)[-i]) {
-        out[c == i & e == j, r1 := 
-              sum(s0_mat[, j] == 1 & s1_list[[j]][1:d_z, paste0('x', i)] == 0)]
-        out[c == i & e == j, r2 := 
-              sum(s0_mat[, i] == 0 & s1_list[[i]][1:d_z, paste0('x', j)] == 1)]
-        out[c == i & e == j, r3 := 
-              (s1_list[[i]][d_z + 1, paste0('x', j)] == 0) + 
-              (s1_list[[j]][d_z + 1, paste0('x', i)] == 0)]
-      }
-    }
-    # Now compare results for i \preceq j and j \preceq i
-    # Heuristic: if r3 > 0, i ~ j. 
-    # Otherwise, max(c(r1, r2)) in either direction
-    # If nothing applies, then we admit our ignorance
-    for (i in 2:d_x) {
-      for (j in 1:(i - 1)) {
-        tmp <- out[c %in% c(i, j) & e %in% c(i, j)]
-        if (tmp[, sum(r3) > 0]) {
-          adj_mat[i, j] <- '0'
-        } else if (tmp[, max(r1)] > tmp[, max(r2)]) {
-          adj_mat[tmp[which.max(r1), e], tmp[which.max(r1), c]] <- 'prec'
-        } else if (tmp[, max(r2)] > tmp[, max(r1)]) {
-          adj_mat[tmp[which.max(r2), e], tmp[which.max(r2), c]] <- 'preceq'
-        }
-      }
-    }
-    iter <- iter + 1
-    
-    # Need some way to update and loop back
-    
-    
-  }
-  
-  
-
-  
-  
-}
-
-
-
-subdag <- function(sim_obj, maxiter) {
-  ### PRELIMINARIES ###
-  # Get data
-  dat <- sim_obj$dat
-  n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
-  d_z <- ncol(z)
-  x <- as.matrix(select(dat, starts_with('x')))
-  d_x <- ncol(x)
-  xlabs <- paste0('x', seq_len(d_x))
-  # Linear or nonlinear?
-  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
-  # Initialize adjacency matrix
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
+  # Initialize
   adj_list <- list(
     matrix(NA_character_, nrow = d_x, ncol = d_x, 
-           dimnames = list(x_labs, x_labs))
+           dimnames = list(xlabs, xlabs))
   )
-  # Stopping parameters
   converge <- FALSE
   iter <- 0
   ### LOOP IT ###
@@ -286,8 +201,8 @@ subdag <- function(sim_obj, maxiter) {
     if (iter == 0) {
       adj0 <- adj1 <- adj_list[[1]]
     } else {
-      adj0 <- adj_list[[iter - 1]]
-      adj1 <- adj_list[[iter]]
+      adj0 <- adj_list[[iter]]
+      adj1 <- adj_list[[iter + 1]]
     }
     for (i in 2:d_x) {
       for (j in 1:(i - 1)) {
@@ -301,8 +216,10 @@ subdag <- function(sim_obj, maxiter) {
           preceq_i <- which(grepl('prec', adj1[i, ]))
           preceq_j <- which(grepl('prec', adj1[j, ]))
           a1 <- intersect(preceq_i, preceq_j) 
-          if (length(a1) > length(a0)) {
-            z_t <- cbind(z, x[, a])
+          if (iter == 0 | length(a1) > length(a0)) {
+            #z_keep <- rowSums(s0_mat[, c(i, j)]) > 0 # Not sure about this...
+            #z_t <- cbind(z[, z_keep], x[, a])
+            z_t <- cbind(z, x[, a1])
             d_zt <- ncol(z_t)
             # Fit reduced models
             s0 <- sapply(c(i, j), function(k) {
@@ -320,10 +237,10 @@ subdag <- function(sim_obj, maxiter) {
               adj1[i, j] <- adj1[j, i] <- '0'
             } else {
               # Sum (de)activations across all nondescendants
-              d_ji <- sum(s0[, 1] == 1 & s1[, 1] == 0)
-              a_ji <- sum(s0[, 2] == 0 & s1[, 2] == 1)
-              d_ij <- sum(s0[, 2] == 1 & s1[, 2] == 0)
-              a_ij <- sum(s0[, 1] == 0 & s1[, 1] == 1)
+              d_ji <- sum(s0[, 1] == 1 & s1[seq_len(d_zt), 1] == 0)
+              a_ji <- sum(s0[, 2] == 0 & s1[seq_len(d_zt), 2] == 1)
+              d_ij <- sum(s0[, 2] == 1 & s1[seq_len(d_zt), 2] == 0)
+              a_ij <- sum(s0[, 1] == 0 & s1[seq_len(d_zt), 1] == 1)
               events <- c(d_ji, a_ji, d_ij, a_ij)
               # Heuristic: go with the max
               if (sum(events) > 0) {
@@ -347,21 +264,15 @@ subdag <- function(sim_obj, maxiter) {
     # Store that iteration's adjacency matrix
     iter <- iter + 1
     adj_list <- append(adj_list, list(adj1))
-    adj0 <- adj_list[[iter - 1]]
-    adj1 <- adj_list[[iter]]
     # Check for convergence
     if (identical(adj0, adj1)) {
       converge <- TRUE
     }
   }
+  # Export final adjacency matrix
+  adj_mat <- adj_list[[length(adj_list)]]
+  return(adj_mat)
 }
-
-
-
-
-
-
-
 
 
 
