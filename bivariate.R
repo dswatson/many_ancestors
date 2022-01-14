@@ -1,7 +1,7 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
 # Set working directory
-setwd('./Documents/many_ancestors')
+setwd('./Documents/UCL/many_ancestors')
 
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
@@ -295,35 +295,21 @@ big_loop <- function(sims_df, sim_id, i, B) {
 
 
 ### SIMULATION GRID ###
-# Simulation grid (linear)
 sims <- expand.grid(
-<<<<<<< HEAD
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.5),
-  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
-)
-sims$lin_pr <- 1
-=======
-  n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.25, 0.75),
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3), lin_pr = 1
 )
-# Simulation grid (nonlinear)
-sims <- expand.grid(
-  n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
-  rho = 0, r2 = 2/3, lin_pr = 1/5
-)
->>>>>>> fa96b505498ff4ecb84888ea2060a49ab3f6d4ce
+# Linear?
+if (linear) {
+  sims$lin_pr <- 1
+  lab <- 'linear_sim.csv'
+} else {
+  sims$lin_pr <- 1/5
+  lab <- 'nonlinear_sim.csv'
+}
+# Index, data table-ify
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
-
-# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
-library(microbenchmark)
-a <- microbenchmark(b = big_loop(sims, 4, 1, 50), times = 10)
-# Simulation grid (nonlinear)
-sims <- expand.grid(
-  n = c(500, 1000), d_z = c(50, 100), sp = c(0.25, 0.75), 
-  rho = 0, r2 = 2/3
-)
-
 
 # Compute in parallel
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
@@ -332,11 +318,7 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
 res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
 res <- merge(res, sims, by = 's_id')
-fwrite(res, 'linear_sim.csv')
-
-
-fwrite(res, 'nonlinear_sim.csv')
-
+fwrite(res, lab)
 
 # Polish for plotting
 res[, hit := ifelse(h == 'h1' & order == 'xy', TRUE, FALSE)]
