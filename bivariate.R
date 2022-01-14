@@ -300,7 +300,7 @@ sims <- expand.grid(
   sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3), lin_pr = 1
 )
 # Linear?
-if (linear) {
+if (linear == TRUE) {
   sims$lin_pr <- 1
   lab <- 'linear_sim.csv'
 } else {
