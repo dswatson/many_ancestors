@@ -71,9 +71,6 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
   t_srt <- as.numeric(tsort(g))
   z_idx <- data.table(z = seq_len(d_z), g = t_srt[seq_len(d_z)])
   x_idx <- data.table(x = seq_len(d_x), g = t_srt[(d_z + 1):(d_z + d_x)])
-  
-  # QUESTION: SHOULD WE HAVE UNOBSERVED CONFOUNDERS???
-  
   # Compute X recursively, record adjacency matrix
   x_labs <- paste0('x', seq_len(d_x))
   x <- matrix(nrow = n, ncol = d_x, dimnames = list(NULL, x_labs))
@@ -172,10 +169,83 @@ l0 <- function(x, y, trn, tst, f) {
 }
 
 
-#' @param sim_obj Simulation object output by \code{sim_dat}.
-#' @param maxiter Maximum number of iterations to loop through.
+#' @param df Table of (de)activation rates.
+#' @param B Number of complementary pairs to draw for stability selection.
 
-subdag <- function(sim_obj, maxiter = 100) {
+# Compute consistency lower bound
+lb_fn <- function(df, B) {
+  # Loop through thresholds
+  lies <- function(tau) {
+    # Internal consistency
+    df[, dji := ifelse(drji >= tau, 1, 0)]
+    df[, aji := ifelse(arji >= tau, 1, 0)]
+    df[, dij := ifelse(drij >= tau, 1, 0)]
+    df[, aij := ifelse(arij >= tau, 1, 0)]
+    df[, int_err := ifelse((dji + aji > 1) | (dij + aij > 1), 1, 0)]
+    int_err <- sum(df$int_err)
+    # External consistency
+    sum_ji <- df[, sum(dji + aji)]
+    sum_ij <- df[, sum(dij + aij)]
+    ext_err <- ifelse(min(c(sum_ji, sum_ij)) > 0, 1, 0)
+    # Export
+    out <- data.table('tau' = tau, 'int_err' = int_err, 'ext_err' = ext_err)
+  }
+  lie_df <- foreach(tt = seq_len(2 * B) / (2 * B), .combine = rbind) %do% 
+    lies(tt)
+  # Compute minimal thresholds
+  min_int <- lie_df[int_err == 0, min(tau)]
+  min_ext <- lie_df[ext_err == 0, min(tau)]
+  min_two <- lie_df[int_err == 0 & ext_err == 0, min(tau)] # It's always ext
+  # Export
+  return(min_two)
+}
+
+
+#' @param df Table of (de)activation rates.
+#' @param lb Consistency lower bound, as computed by \code{lb_fn}.
+#' @param order Causal order of interest, either \code{"ij"} or \code{"ji"}.
+#' @param rule Inference rule, either \code{"R1"} or \code{"R2"}.
+#' @param B Number of complementary pairs to draw for stability selection.
+
+# Infer causal direction using stability selection
+ss_fn <- function(df, lb, order, rule, B) {
+  # Find the right rate
+  if (order == 'ji' & rule == 'R1') {
+    r <- df[, drji]
+  } else if (order == 'ji' & rule == 'R2') {
+    r <- df[, arji]
+  } else if (order == 'ij' & rule == 'R1') {
+    r <- df[, drij]
+  } else if (order == 'ij' & rule == 'R2') {
+    r <- df[, arij]
+  } 
+  # Stability selection parameters
+  q <- sum(r)
+  theta <- q / length(r)
+  ub <- minD(theta, B) * sum(r <= theta)
+  tau <- seq_len(2 * B) / (2 * B)
+  # Do any features exceed the upper bound?
+  dat <- data.frame(tau, err_bound = ub) %>%
+    filter(tau > lb) %>%
+    rowwise() %>%
+    mutate(detected = sum(r >= tau)) %>% 
+    ungroup(.) %>%
+    mutate(surplus = ifelse(detected > err_bound, 1, 0))
+  # Export
+  out <- data.table(
+    'order' = order, 'rule' = rule, 
+    'decision' = ifelse(sum(dat$surplus) > 0, 1, 0)
+  )
+  return(out)
+}
+
+
+#' @param sim_obj Simulation object as computed by \code{sim_dat}.
+#' @param maxiter Maximum number of iterations to loop through if convergence
+#'   is elusive.
+#' @param B Number of complementary pairs to draw for stability selection.
+
+subdag <- function(sim_obj, maxiter = 100, B = 50) {
   ### PRELIMINARIES ###
   # Get data, hyperparameters, train/test split
   dat <- sim_obj$dat
@@ -186,11 +256,9 @@ subdag <- function(sim_obj, maxiter = 100) {
   d_x <- ncol(x)
   xlabs <- paste0('x', seq_len(d_x))
   f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
-  trn <- sample(n, round(0.8 * n))
-  tst <- seq_len(n)[-trn]
   # Initialize
   adj_list <- list(
-    matrix(NA_character_, nrow = d_x, ncol = d_x, 
+    matrix(NA_real_, nrow = d_x, ncol = d_x, 
            dimnames = list(xlabs, xlabs))
   )
   converge <- FALSE
@@ -204,61 +272,89 @@ subdag <- function(sim_obj, maxiter = 100) {
       adj0 <- adj_list[[iter]]
       adj1 <- adj_list[[iter + 1]]
     }
+    # Subsampling loop
+    sub_loop <- function(b, i, j, a1) {
+      z_t <- cbind(z, x[, a1])
+      d_zt <- ncol(z_t)
+      # Take complementary subsets
+      a_set <- sample(n, round(0.5 * n))
+      a_trn <- sample(a_set, round(0.8 * length(a_set)))
+      a_tst <- setdiff(a_set, a_trn)
+      b_set <- seq_len(n)[-a_set]
+      b_trn <- sample(b_set, round(0.8 * length(b_set)))
+      b_tst <- setdiff(b_set, b_trn)
+      # Fit reduced models
+      s0 <- sapply(c(i, j), function(k) {
+        c(l0(z_t, x[, k], a_trn, a_tst, f), 
+          l0(z_t, x[, k], b_trn, b_tst, f))
+      })
+      # Fit expanded models
+      s1 <- sapply(c(i, j), function(k) {
+        not_k <- setdiff(c(i, j), k)
+        c(l0(cbind(z_t, x[, not_k]), x[, k], a_trn, a_tst, f),
+          l0(cbind(z_t, x[, not_k]), x[, k], b_trn, b_tst, f))
+      })
+      # Record disconnections and (de)activations
+      dis_a <- any(s1[d_zt + 1, ] == 0)
+      dis_b <- any(s1[2 * (d_zt + 1), ] == 0)
+      dis <- rep(c(dis_a, dis_b), each = d_zt)
+      d_ji <- s0[, 1] == 1 & s1[seq_len(d_zt), 1] == 0
+      a_ji <- s0[, 2] == 0 & s1[seq_len(d_zt), 2] == 1
+      d_ij <- s0[, 2] == 1 & s1[seq_len(d_zt), 2] == 0
+      a_ij <- s0[, 1] == 0 & s1[seq_len(d_zt), 1] == 1
+      # Export
+      out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_zt), i, j,
+                        z = rep(colnames(z_t), times = 2),
+                        dis, d_ji, a_ji, d_ij, a_ij)
+      return(out)
+    }
+    # Pairwise test loop
     for (i in 2:d_x) {
       for (j in 1:(i - 1)) {
-        # Only continue if the relationship is unknown
-        if (is.na(adj1[i, j]) & is.na(adj1[j, i])) {
+        # Only continue if relationship is unknown
+        if (is.na(adj1[i, j]) & is.na(adj1[j, i])) { 
+          preceq_i <- which(adj0[i, ] > 0)
+          preceq_j <- which(adj0[j, ] > 0)
+          a0 <- intersect(preceq_i, preceq_j) 
+          preceq_i <- which(adj1[i, ] > 0)
+          preceq_j <- which(adj1[j, ] > 0)
+          a1 <- intersect(preceq_i, preceq_j) 
           # Only continue if the set of nondescendants has increased since last 
           # iteration (i.e., have we learned anything new?)
-          preceq_i <- which(grepl('prec', adj0[i, ]))
-          preceq_j <- which(grepl('prec', adj0[j, ]))
-          a0 <- intersect(preceq_i, preceq_j) 
-          preceq_i <- which(grepl('prec', adj1[i, ]))
-          preceq_j <- which(grepl('prec', adj1[j, ]))
-          a1 <- intersect(preceq_i, preceq_j) 
           if (iter == 0 | length(a1) > length(a0)) {
-            #z_keep <- rowSums(s0_mat[, c(i, j)]) > 0 # Not sure about this...
-            #z_t <- cbind(z[, z_keep], x[, a])
-            z_t <- cbind(z, x[, a1])
-            d_zt <- ncol(z_t)
-            # Fit reduced models
-            s0 <- sapply(c(i, j), function(k) {
-              l0(z_t, x[, k], trn, tst, f)
-            })
-            # Fit expanded models
-            s1 <- sapply(c(i, j), function(k) {
-              not_k <- setdiff(c(i, j), k)
-              l0(cbind(z_t, x[, not_k]), x[, k], trn, tst, f)
-            })
-            # Apply rules
-            if (any(s1[d_zt + 1, ] == 0)) {
-              # If either Xi or Xj receives zero weight in the other's regression,
-              # we stop there
-              adj1[i, j] <- adj1[j, i] <- '0'
+            df <- foreach(bb = seq_len(B), .combine = rbind) %dopar%
+              sub_loop(bb, i, j, a1)
+            # Compute rates
+            df[, disr := sum(dis) / .N]
+            if (df$disr[1] >= 0.25) { # Totally arbitrary threshold?
+              adj1[i, j] <- adj1[j, i] <- 0
             } else {
-              # Sum (de)activations across all nondescendants
-              d_ji <- sum(s0[, 1] == 1 & s1[seq_len(d_zt), 1] == 0)
-              a_ji <- sum(s0[, 2] == 0 & s1[seq_len(d_zt), 2] == 1)
-              d_ij <- sum(s0[, 2] == 1 & s1[seq_len(d_zt), 2] == 0)
-              a_ij <- sum(s0[, 1] == 0 & s1[seq_len(d_zt), 1] == 1)
-              events <- c(d_ji, a_ji, d_ij, a_ij)
-              # Heuristic: go with the max
-              if (sum(events) > 0) {
-                if (d_ji > max(events[-1])) {
-                  adj1[j, i] <- 'prec'
-                } else if (a_ji > max(events[-2]) | 
-                           min(c(d_ji, a_ji)) > max(d_ij, a_ij)) {
-                  adj1[j, i] <- 'preceq'
-                } else if (d_ij > max(events[-3])) {
-                  adj1[i, j] <- 'prec'
-                } else if (a_ij > max(events[-4]) | 
-                           min(c(d_ij, a_ij)) > max(d_ji, a_ji)) {
-                  adj1[i, j] <- 'preceq'
+              df[, drji := sum(d_ji) / .N, by = z]
+              df[, arji := sum(a_ji) / .N, by = z]
+              df[, drij := sum(d_ij) / .N, by = z]
+              df[, arij := sum(a_ij) / .N, by = z]
+              df <- unique(df[, .(i, j, z, disr, drji, arji, drij, arij)])
+              # Consistent lower bound
+              lb <- lb_fn(df, B)
+              # Stable upper bound
+              out <- foreach(oo = c('ji', 'ij'), .combine = rbind) %:%
+                foreach(rr = c('R1', 'R2'), .combine = rbind) %do%
+                ss_fn(df, lb, oo, rr, B)
+              # Update adjacency matrix
+              if (sum(out$decision) == 1) {
+                if (out[decision == 1, order == 'ji' & rule == 'R1']) {
+                  adj1[i, j] <- 1
+                } else if (out[decision == 1, order == 'ji' & rule == 'R2']) {
+                  adj1[i, j] <- 0.5
+                } else if (out[decision == 1, order == 'ij' & rule == 'R1']) {
+                  adj1[j, i] <- 1
+                } else if (out[decision == 1, order == 'ij' & rule == 'R2']) {
+                  adj1[j, i] <- 0.5
                 }
               }
             }
           }
-        }
+        } 
       }
     }
     # Store that iteration's adjacency matrix
@@ -274,6 +370,9 @@ subdag <- function(sim_obj, maxiter = 100) {
   return(adj_mat)
 }
 
+
+# TODO:
+# -Add unobserved confounders
 
 
 
