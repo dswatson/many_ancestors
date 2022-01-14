@@ -75,6 +75,7 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
   x_labs <- paste0('x', seq_len(d_x))
   x <- matrix(nrow = n, ncol = d_x, dimnames = list(NULL, x_labs))
   adj_mat <- matrix(0, nrow = d_x, ncol = d_x, dimnames = list(x_labs, x_labs))
+  diag(adj_mat) <- NA_real_
   for (j in seq_len(d_x)) {
     # Index the parents
     pa <- c()
@@ -143,7 +144,7 @@ l0 <- function(x, y, trn, tst, f) {
                        'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
     beta <- double(length = ncol(x))
-    names(beta) <- paste0('z', seq_len(ncol(x)))
+    names(beta) <- colnames(x)
     s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
     rfe_loop <- function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
@@ -245,6 +246,7 @@ ss_fn <- function(df, lb, order, rule, B) {
 #'   is elusive.
 #' @param B Number of complementary pairs to draw for stability selection.
 
+# Subdag discovery algorithm
 subdag <- function(sim_obj, maxiter = 100, B = 50) {
   ### PRELIMINARIES ###
   # Get data, hyperparameters, train/test split
@@ -322,7 +324,7 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
           # Only continue if the set of nondescendants has increased since last 
           # iteration (i.e., have we learned anything new?)
           if (iter == 0 | length(a1) > length(a0)) {
-            df <- foreach(bb = seq_len(B), .combine = rbind) %dopar%
+            df <- foreach(bb = seq_len(B), .combine = rbind) %do%
               sub_loop(bb, i, j, a1)
             # Compute rates
             df[, disr := sum(dis) / .N]
@@ -386,6 +388,55 @@ df <- data.table(y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat))
 df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
 df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
 
+
+### SIMULATION GRID ###
+# Simulation grid (linear)
+sims <- expand.grid(
+  n = c(500, 1000, 2000), d_z = c(50, 100, 200), d_x = c(6, 8, 10), 
+  rho = c(0, 0.5), r2 = c(1/3, 1/2, 2/3), 
+  sp = c(0.25, 0.5, 0.75), method = 'er', pref = 1, lin_pr = 1
+)
+sims$s_id <- seq_len(nrow(sims))
+sims <- as.data.table(sims)
+big_loop <- function(sims, sim_id, i) {
+  # Simulate data
+  sdf <- sims[s_id == sim_id]
+  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
+                 r2 = sdf$r2, sp = sdf$sp, method = sdf$method, pref = sdf$pref,
+                 lin_pr = sdf$lin_pr)
+  # Estimate adjacency matrix
+  ahat <- subdag(sim)
+  # Export results
+  out <- data.table(
+    s_id = sim_id, y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat)
+  ) %>% filter(!is.na(y))
+  return(out)
+}
+
+
+df[, sum(is.na(y_hat)) / .N]
+df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
+df[y == 1, sum(yhat, na.rm = TRUE) / .N] 
+
+# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
+library(microbenchmark)
+a <- microbenchmark(b = big_loop(sims, 4, 1), times = 5)
+
+
+# Compute in parallel
+res <- foreach(ss = sims$s_id, .combine = rbind) %:%
+  foreach(ii = seq_len(10), .combine = rbind) %dopar%
+  big_loop(sims, ss, ii)
+res[, hit_rate := sum(yhat) / .N, by = s_id]
+
+
+
+
+
+res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
+res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
+res <- merge(res, sims, by = 's_id')
+fwrite(res, 'nonlinear_sim.csv')
 
 
 
