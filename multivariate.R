@@ -261,10 +261,10 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
     matrix(NA_real_, nrow = d_x, ncol = d_x, 
            dimnames = list(xlabs, xlabs))
   )
-  converge <- FALSE
+  converged <- FALSE
   iter <- 0
   ### LOOP IT ###
-  while(converge == FALSE & iter <= maxiter) {
+  while(converged == FALSE & iter <= maxiter) {
     # Extract relevant adjacency matrices
     if (iter == 0) {
       adj0 <- adj1 <- adj_list[[1]]
@@ -351,6 +351,12 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
                 } else if (out[decision == 1, order == 'ij' & rule == 'R2']) {
                   adj1[j, i] <- 0.5
                 }
+              } else if (sum(out$decision == 2)) {
+                if (out[order == 'ji', sum(decision) == 2]) {
+                  adj1[i, j] <- 0.5
+                } else if (out[order == 'ij', sum(decision) == 2]) {
+                  adj1[j, i] <- 0.5
+                }
               }
             }
           }
@@ -362,13 +368,25 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
     adj_list <- append(adj_list, list(adj1))
     # Check for convergence
     if (identical(adj0, adj1)) {
-      converge <- TRUE
+      converged <- TRUE
     }
   }
   # Export final adjacency matrix
   adj_mat <- adj_list[[length(adj_list)]]
   return(adj_mat)
 }
+
+# Evaluate performance
+sim <- sim_dat(n = 2000, d_z = 100, d_x = 10, rho = 0, r2 = 2/3, lin_pr = 1,
+               sp = 0.5, method = 'er', pref = 1)
+ahat <- subdag(sim)
+
+# Sensitivity and specificity
+df <- data.table(y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat))
+df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
+df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
+
+
 
 
 # TODO:
