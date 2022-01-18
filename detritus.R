@@ -1,4 +1,90 @@
 
+#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param B Number of complementary pairs to draw for stability selection.
+
+# Compute (de)activation rates
+rate_fn <- function(sim_obj, B) {
+  ### PRELIMINARIES ###
+  # Get data
+  dat <- sim_obj$dat
+  n <- nrow(dat)
+  z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
+  x <- as.matrix(select(dat, starts_with('x')))
+  d_x <- ncol(x)
+  xlabs <- paste0('x', seq_len(d_x))
+  # Linear or nonlinear?
+  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
+  # Initialize adjacency matrix
+  adj_mat <- matrix(NA_character_, nrow = d_x, ncol = d_x, 
+                    dimnames = list(x_labs, x_labs))
+  
+  ### LOOP THROUGH ROUNDS ###
+  t_loop <- function(...) {
+    # Update dimensionality
+    d_z <- ncol(z_plus)
+    d_x <- ncol(x_minus)
+    # Random train/test split
+    trn <- sample(n, round(0.8 * n))
+    tst <- seq_len(n)[-trn]
+    # Fit reduced models: d_z x d_x matrix
+    s0_mat <- sapply(seq_len(d_x), function(i) {
+      l0(z, x[, i], trn, tst, f)
+    })
+    # Fit expanded models: list of length d_x, 
+    # each element a (d_z + 1) x (d_x - 1) matrix
+    s1_list <- lapply(seq_len(d_x), function(i) {
+      m <- sapply(seq_len(d_x)[-i], function(j) {
+        l0(cbind(z, x[, j]), x[, i], trn, tst, f)
+      })
+      colnames(m) <- paste0('x', seq_len(d_x)[-i])
+      return(m)
+    })
+    # Apply rules: count instances of R1-R3 for all pairs
+    out <- expand.grid(c = seq_len(d_x), e = seq_len(d_x), 
+                       r1 = 0, r2 = 0, r3 = 0)
+    out <- as.data.table(out)
+    out <- out[c != e]
+    for (i in seq_len(d_x)) {
+      for (j in seq_len(d_x)[-i]) {
+        out[c == i & e == j, r1 := 
+              sum(s0_mat[, j] == 1 & s1_list[[j]][1:d_z, paste0('x', i)] == 0)]
+        out[c == i & e == j, r2 := 
+              sum(s0_mat[, i] == 0 & s1_list[[i]][1:d_z, paste0('x', j)] == 1)]
+        out[c == i & e == j, r3 := 
+              (s1_list[[i]][d_z + 1, paste0('x', j)] == 0) + 
+              (s1_list[[j]][d_z + 1, paste0('x', i)] == 0)]
+      }
+    }
+    # Now compare results for i \preceq j and j \preceq i
+    # Heuristic: if r3 > 0, i ~ j. 
+    # Otherwise, max(c(r1, r2)) in either direction
+    # If nothing applies, then we admit our ignorance
+    for (i in 2:d_x) {
+      for (j in 1:(i - 1)) {
+        tmp <- out[c %in% c(i, j) & e %in% c(i, j)]
+        if (tmp[, sum(r3) > 0]) {
+          adj_mat[i, j] <- '0'
+        } else if (tmp[, max(r1)] > tmp[, max(r2)]) {
+          adj_mat[tmp[which.max(r1), e], tmp[which.max(r1), c]] <- 'prec'
+        } else if (tmp[, max(r2)] > tmp[, max(r1)]) {
+          adj_mat[tmp[which.max(r2), e], tmp[which.max(r2), c]] <- 'preceq'
+        }
+      }
+    }
+    iter <- iter + 1
+    
+    # Need some way to update and loop back
+    
+    
+  }
+  
+  
+  
+  
+  
+}
+
 
 
 # Test hypothesis that error inflation on aryx for dense graphs is a function
