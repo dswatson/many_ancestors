@@ -84,7 +84,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
 
 
 #' @param m Number of nested models to fit.
-#' @param max_x Number of predictors in largest model.
+#' @param max_d Number of predictors in largest model.
 #' @param min_d Number of predictors in smallest model.
 #' @param decay Exponential decay parameter
 
@@ -115,27 +115,28 @@ l0 <- function(x, y, trn, tst, d_z, f) {
     betas <- coef(fit)[1:d_z, ]
   } else if (f == 'rf') {
     fit <- randomForest(x[trn, ], y[trn], ntree = 200)
+    yhat_f0 <- predict(fit, newdata = x[tst, ], 
+                       predict.all = TRUE)$individual[, sample(200, 50)]
     vimp <- data.frame('feature' = colnames(x), 
                        'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
-    beta <- double(length = d_z)
-    names(beta) <- paste0('z', seq_len(d_z))
     s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
-    rfe_loop <- function(k) {
+    y_hat <- sapply(seq_along(s), function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
       tmp_f <- randomForest(tmp_x, y[trn], ntree = 50)
-      tmp_v <- data.frame('feature' = colnames(tmp_x), 
-                          'imp' = as.numeric(importance(tmp_f))) %>%
-        filter(grepl('z', feature))
-      beta[tmp_v$feature] <- tmp_v$imp
-      out <- list('y_hat' = predict(tmp_f, newdata = x[tst, ]), 'beta' = beta)
+      out <- predict(tmp_f, newdata = x[tst, ])
       return(out)
-    }
-    rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
-    y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
-    y_hat <- cbind(y_hat, predict(fit, newdata = x[tst, ]))
-    betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
-    betas <- cbind(betas, as.numeric(importance(fit))[seq_len(d_z)])
+    })
+    y_hat <- cbind(y_hat, yhat_f0)
+    beta <- double(length = d_z)
+    names(beta) <- paste0('z', seq_len(d_z))
+    betas <- sapply(seq_along(s), function(k) {
+      out <- beta
+      keep <- vimp$feature[seq_len(s[k])]
+      out[keep] <- 1
+      return(out)
+    })
+    betas <- cbind(betas, rep(1, d_z))
   }
   epsilon <- y_hat - y[tst]
   mse <- colMeans(epsilon^2)
@@ -159,7 +160,7 @@ rate_fn <- function(sim_obj, B) {
   zx <- cbind(z, x)
   # Linear or nonlinear?
   f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
-  # Compute feature weights
+  # Compute (de)activations per subsample
   fit_fn <- function(h, b) {
     if (h == 'h0') y <- dat$y0 else y <- dat$y1
     zy <- cbind(z, y)
