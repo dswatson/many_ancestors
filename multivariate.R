@@ -114,12 +114,14 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
 # Note: lower triangular adj_mat means that column is a parent of row
 
 #' @param m Number of nested models to fit.
-#' @param max_x Number of predictors in largest model.
-#' @param min_d Number of predictors in smallest model.
+#' @param max_d Number of predictors in largest model.
 #' @param decay Exponential decay parameter
+#' @param d_x Dimensionality of X.
 
 # Precompute subset sizes for RFE
-subsets <- function(m, max_d, min_d, decay) {
+subsets <- function(m, max_d, decay, d_x) {
+  out <- 2:d_x
+  
   out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
   out <- na.omit(unique(out)[seq_len(m)])
   return(out)
@@ -140,6 +142,8 @@ l0 <- function(x, y, trn, tst, f) {
     betas <- coef(fit, s = fit$lambda)[-1, ]
   } else if (f == 'rf') {
     fit <- randomForest(x[trn, ], y[trn], ntree = 200)
+    yhat_f0 <- predict(fit, newdata = x[tst, ], 
+                       predict.all = TRUE)$individual[, sample(200, 50)]
     vimp <- data.frame('feature' = colnames(x), 
                        'imp' = as.numeric(importance(fit))) %>%
       arrange(desc(imp))
@@ -150,15 +154,14 @@ l0 <- function(x, y, trn, tst, f) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
       tmp_f <- randomForest(tmp_x, y[trn], ntree = 50)
       tmp_v <- data.frame('feature' = colnames(tmp_x), 
-                          'imp' = as.numeric(importance(tmp_f))) %>%
-        filter(grepl('z', feature))
+                          'imp' = as.numeric(importance(tmp_f)))
       beta[tmp_v$feature] <- tmp_v$imp
       out <- list('y_hat' = predict(tmp_f, newdata = x[tst, ]), 'beta' = beta)
       return(out)
     }
     rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
     y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
-    y_hat <- cbind(y_hat, predict(fit, newdata = x[tst, ]))
+    y_hat <- cbind(y_hat, yhat_f0)
     betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
     betas <- cbind(betas, as.numeric(importance(fit))[seq_len(ncol(x))])
   }
