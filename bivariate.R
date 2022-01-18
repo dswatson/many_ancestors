@@ -119,7 +119,8 @@ l0 <- function(x, y, trn, tst, d_z, f) {
                        predict.all = TRUE)$individual[, sample(200, 50)]
     vimp <- data.frame('feature' = colnames(x), 
                        'imp' = as.numeric(importance(fit))) %>%
-      arrange(desc(imp))
+      filter(grepl('z', feature)) %>%
+      arrange(desc(imp)) 
     s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
     y_hat <- sapply(seq_along(s), function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
@@ -298,7 +299,7 @@ big_loop <- function(sims_df, sim_id, i, B) {
 ### SIMULATION GRID ###
 sims <- expand.grid(
   n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.5),
-  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3), lin_pr = 1
+  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
 )
 # Linear?
 if (linear == TRUE) {
