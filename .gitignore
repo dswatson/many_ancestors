@@ -41,3 +41,4 @@ vignettes/*.pdf
 # Also
 .DS_Store
 *.Rproj
+sim_v1.R
