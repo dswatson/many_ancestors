@@ -203,6 +203,9 @@ rate_fn <- function(sim_obj, B) {
   return(out)
 }
 
+#' @param res Results object output by \code{rate_fn}.
+#' @param hyp If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
+#' @param B Number of complementary pairs to draw for stability selection.
 
 # Compute consistency lower bound
 lb_fn <- function(res, hyp, B) {
@@ -235,6 +238,12 @@ lb_fn <- function(res, hyp, B) {
   return(out)
 }
 
+#' @param res Results object output by \code{rate_fn}.
+#' @param cons_tbl Consistency table output by \code{lb_fn}.
+#' @param hyp If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
+#' @param order Assume X \preceq Y or Y \preceq X?
+#' @param rule Detect via deactivation (\code{"R1"}) or activation (\code{"R2"})?
+#' @param B Number of complementary pairs to draw for stability selection.
 
 # Infer causal direction using stability selection
 ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
@@ -270,6 +279,7 @@ ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
   return(out)
 }
 
+################################################################################
 
 # Big ol' wrapper
 big_loop <- function(sims_df, sim_id, i, B) {
@@ -277,8 +287,6 @@ big_loop <- function(sims_df, sim_id, i, B) {
   sdf <- sims_df[s_id == sim_id]
   sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
                  sp = sdf$sp, r2 = sdf$r2, lin_pr = sdf$lin_pr)
-  d_xy_true <- sim$wts$beta == 1 & sim$wts$gamma == 0
-  a_xy_true <- sim$wts$beta == 0 & sim$wts$gamma == 1
   # Compute (de)activation rates for each z, h
   res <- rate_fn(sim, B)
   # Consistent lower bound
@@ -294,79 +302,6 @@ big_loop <- function(sims_df, sim_id, i, B) {
   sum_tbl[, idx := i]
   return(sum_tbl)
 }
-
-
-### SIMULATION GRID ###
-sims <- expand.grid(
-  n = c(500, 1000, 2000), d_z = c(50, 100, 200), rho = c(0, 0.5),
-  sp = c(0.25, 0.5, 0.75), r2 = c(1/3, 1/2, 2/3)
-)
-# Linear?
-if (linear == TRUE) {
-  sims$lin_pr <- 1
-  lab <- 'linear_sim.csv'
-} else {
-  sims$lin_pr <- 1/5
-  lab <- 'nonlinear_sim.csv'
-}
-# Index, data table-ify
-sims$s_id <- seq_len(nrow(sims))
-sims <- as.data.table(sims)
-
-# Compute in parallel
-res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(100), .combine = rbind) %dopar%
-  big_loop(sims, ss, ii, B = 50)
-res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
-res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
-res <- merge(res, sims, by = 's_id')
-fwrite(res, lab)
-
-# Polish for plotting
-res[, hit := ifelse(h == 'h1' & order == 'xy', TRUE, FALSE)]
-res[, setting := paste(h, order, rule, sep = ',')]
-res[, setting := factor(setting, levels = c('h0,yx,R1', 'h0,yx,R2', 'h0,xy,R1', 'h0,xy,R2',
-                                            'h1,yx,R1', 'h1,yx,R2', 'h1,xy,R1', 'h1,xy,R2'))]
-res[, n := paste0('n=', n)]
-res[, n := factor(n, levels = c('n=500', 'n=1000', 'n=2000'))]
-res[, d_z := paste0('d=', d_z)]
-res[, d_z := factor(d_z, levels = c('d=50', 'd=100', 'd=200'))]
-plot_loop <- function(r, s, p) {
-  # Labels
-  if (r == 1/3) {
-    rlab <- 'lo' 
-  } else if (r == 1/2) {
-    rlab <- 'me'
-  } else if (r == 2/3) {
-    rlab <- 'hi'
-  }
-  if (s == 0.25) {
-    slab <- 'lo'
-  } else if (s == 0.5) {
-    slab <- 'me'
-  } else if (s == '0.75') {
-    slab <- 'hi'
-  }
-  if (p == 0) {
-    plab <- 'lo'
-  } else if (p == 0.5) {
-    plab <- 'hi'
-  }
-  # Plot
-  p <- ggplot(res[r2 == r & sp == s & rho == p], 
-              aes(setting, hit_rate, color = hit)) + 
-    geom_bar(stat = 'identity') + 
-    theme_bw() + 
-    theme(axis.text.x = element_text(angle = 45)) + 
-    facet_grid(d_z ~ n)
-  # Export
-  ggsave(paste0('./plots/linear_bivariate_r2=', rlab, ',sp=', slab, 
-                ',rho=', plab, '.png'))
-}
-foreach(aa = c(1/3, 1/2, 2/3)) %:%
-  foreach(bb = c(0.25, 0.5, 0.75)) %:%
-  foreach(cc = c(0, 0.5)) %do%
-  plot_loop(aa, bb, cc)
 
 
 
