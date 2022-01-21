@@ -381,16 +381,6 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
   return(adj_mat)
 }
 
-# Evaluate performance
-sim <- sim_dat(n = 2000, d_z = 100, d_x = 10, rho = 0, r2 = 2/3, lin_pr = 1,
-               sp = 0.5, method = 'er', pref = 1)
-ahat <- subdag(sim)
-
-# Sensitivity and specificity
-df <- data.table(y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat))
-df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
-df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
-
 
 ### SIMULATION GRID ###
 # Simulation grid (linear)
@@ -401,6 +391,8 @@ sims <- expand.grid(
 )
 sims$s_id <- seq_len(nrow(sims))
 sims <- as.data.table(sims)
+sims[, method := as.character(method)]
+
 big_loop <- function(sims, sim_id, i) {
   # Simulate data
   sdf <- sims[s_id == sim_id]
@@ -416,14 +408,11 @@ big_loop <- function(sims, sim_id, i) {
   return(out)
 }
 
-
-df[, sum(is.na(y_hat)) / .N]
-df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
-df[y == 1, sum(yhat, na.rm = TRUE) / .N] 
-
-# Try microbenchmarking! Took ~24 hrs to run ~240k sims on an 8 core machine
+# How long will this take?
 library(microbenchmark)
-a <- microbenchmark(b = big_loop(sims, 4, 1), times = 5)
+a <- microbenchmark(b = foreach(ss = 1:27, .combine = rbind) %do%
+                      big_loop(sims, ss, 1), times = 1)
+
 
 
 # Compute in parallel
@@ -434,6 +423,9 @@ res[, hit_rate := sum(yhat) / .N, by = s_id]
 
 
 
+df[, sum(is.na(y_hat)) / .N]
+df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
+df[y == 1, sum(yhat, na.rm = TRUE) / .N] 
 
 
 res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
@@ -441,10 +433,15 @@ res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
 res <- merge(res, sims, by = 's_id')
 fwrite(res, 'nonlinear_sim.csv')
 
+# Evaluate performance
+sim <- sim_dat(n = 2000, d_z = 100, d_x = 10, rho = 0, r2 = 2/3, lin_pr = 1,
+               sp = 0.5, method = 'er', pref = 1)
+ahat <- subdag(sim)
 
-
-# TODO:
-# -Add unobserved confounders
+# Sensitivity and specificity
+df <- data.table(y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat))
+df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
+df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
 
 
 
