@@ -72,8 +72,8 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   if (oracle == 'na') {
     oracle2 <- ifelse(rbinom(1, 1, 0.5) == 1, 'xy', 'ci')
     shared_parents <- which(beta != 0 & gamma != 0)
-    keep <- sample(shared_parents, size = length(shared_parents)/2)
-    z <- z[, keep]
+    u <- sample(shared_parents, size = length(shared_parents)/2)
+    z <- z[, -u]
     d_z <- ncol(z)
   } else {
     oracle2 <- 'blah'
@@ -287,17 +287,21 @@ ss_fn <- function(res, lb, order, rule, B) {
     r <- res$aryx 
   }
   r <- na.omit(r)
-  # Stability selection parameters
-  theta <- mean(r)
-  ub <- minD(theta, B) * sum(r <= theta)
-  tau <- seq_len(2 * B) / (2 * B)
-  # Do any features exceed the upper bound?
-  dat <- data.frame(tau, err_bound = ub) %>%
-    filter(tau > lb) %>%
-    rowwise() %>%
-    mutate(detected = sum(r >= tau)) %>% 
-    ungroup(.) %>%
-    mutate(surplus = ifelse(detected > err_bound, 1, 0))
+  if (max(r) == 0) {
+    dat <- data.frame(surplus = 0)
+  } else {
+    # Stability selection parameters
+    theta <- mean(r)
+    ub <- minD(theta, B) * sum(r <= theta)
+    tau <- seq_len(2 * B) / (2 * B)
+    # Do any features exceed the upper bound?
+    dat <- data.frame(tau, err_bound = ub) %>%
+      filter(tau > lb) %>%
+      rowwise() %>%
+      mutate(detected = sum(r >= tau)) %>% 
+      ungroup(.) %>%
+      mutate(surplus = ifelse(detected > err_bound, 1, 0))
+  }
   # Export
   out <- data.table(
     'order' = order, 'rule' = rule, 
@@ -499,7 +503,6 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle) 
-  dd <- sdf$oracle
   # Confounder blanket regression
   df_b <- cbr_fn(dd, sim_obj, eps = 0.25)
   # Constraint function
@@ -508,7 +511,7 @@ big_loop <- function(sims_df, sim_id, i) {
   df_s <- score_fn(dd, sim_obj)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
-    mutate(oracle = dd, s_id = sim_id, idx = i) %>%
+    mutate(oracle = sdf$oracle, s_id = sim_id, idx = i) %>%
     as.data.table(.)
   return(out)
 }
