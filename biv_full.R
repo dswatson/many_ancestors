@@ -420,20 +420,22 @@ constr_fn <- function(sim_obj, h, alpha, tau) {
 
 # MSE-scoring subroutine
 mse_fn <- function(x, y, f) {
-  # Split training, validation, and test sets
+  # Split data
+  n <- nrow(x)
   trn <- sample(n, size = round(0.8 * n))
-  val <- sample(seq_len(n)[-trn], size = round(0.1 * n))
-  tst <- setdiff(seq_len(n), c(trn, val))
-  # Fit model, choose lambda
-  fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
-  y_hat <- predict(fit, newx = x[val, ], s = fit$lambda)
-  eps_val <- y_hat - y[val]
-  mse <- colMeans(eps_val^2)
-  k <- which.min(mse)
-  # Evaluate, export
-  eps_tst <- predict(fit, newx = x[tst, ], s = fit$lambda[k]) - y[tst]
-  err <- mean(eps_tst^2)
-  return(err)
+  tst <- seq_len(n)[-trn]
+  # Fit models
+  if (f == 'lasso') {
+    fit <- cv.glmnet(x[trn, ], y[trn])
+    y_hat <- predict(fit, newx = x[tst, ], s = 'lambda.min')
+  } else if (f == 'rf') {
+    fit <- ranger(x = x[trn, ], y = y[trn], num.threads = 1)
+    y_hat <- predict(fit, data = x[tst, ], num.threads = 1)$predictions
+  }
+  # Evaluate errors, export
+  eps <- y_hat - y[tst]
+  mse <- mean(eps^2)
+  return(mse)
 }
 
 #' @param h If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
@@ -495,15 +497,15 @@ big_loop <- function(sims_df, sim_id, i) {
   out[, idx := i]
   # Check in
   if (i == 100) {
-    print(paste('s_id =', sim_id, 'complete.\n', 
-                max(sims_df$s_id) - sim_id, 'more to go...\n'))
+    cat(paste('s_id =', sim_id, 'complete.\n', 
+        max(sims_df$s_id) - sim_id, 'more to go...\n'))
   }
   return(out)
 }
 
 # Execute in parallel
 sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75)) %>%
-  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, s_id = row_number()) %>%
+  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
