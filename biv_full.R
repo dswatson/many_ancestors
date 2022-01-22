@@ -279,8 +279,7 @@ ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
   # Find consistency lower bound
   lb <- cons_tbl[h == hyp, min_two]
   # Stability selection parameters
-  q <- sum(r)
-  theta <- q / length(r)
+  theta <- mean(r)
   ub <- minD(theta, B) * sum(r <= theta)
   tau <- seq_len(2 * B) / (2 * B)
   # Do any features exceed the upper bound?
@@ -335,6 +334,7 @@ cbr_fn <- function(sim, hyp, eps) {
 #' @param tau Other threshold for "inferring" independence.
 
 # Constraint-based: for this comparison, we presume X \preceq Y
+# and assume access to the true data sparsity
 constr_fn <- function(sim_obj, h, alpha, tau) {
   # Get data
   dat <- sim_obj$dat
@@ -342,79 +342,98 @@ constr_fn <- function(sim_obj, h, alpha, tau) {
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- dat$x
+  if (h == 'h0') y <- dat$y0 else y <- dat$y1
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
-  # Apply Entner's rules once per Z
-  entnerish <- function(j) {
-    if (h == 'h0') y <- dat$y0 else y <- dat$y1
-    if (linear == TRUE) {
-      pcor_pmat <- pcor(cbind(x, y, z[, j]))$p.value
-      ### RULE 1 ###
-      p1.i <- cor.test(y, z[, j])$p.value
-      p1.ii <- pcor_pmat[2, 3]
-      ### RULE 2 ###
-      p2.i <- pcor_pmat[1, 2]
-      p2.ii <- cor.test(x, z[, j])$p.value
-    } else {
-      dat <- cbind(x, y, z[, j])
-      ### RULE 1 ###
-      p1.i <- hsic.gamma(y, z[, j])$p.value
-      p1.ii <- kernelCItest(
-        x = 2, y = 3, S = 1, 
-        suffStat = list(data = dat, ic.method = 'hsic.gamma')
-      )
-      ### RULE 2 ###
-      p2.i <- kernelCItest(
-        x = 1, y = 2, S = 3, 
-        suffStat = list(data = dat, ic.method = 'hsic.gamma')
-      )
-      p2.ii <- hsic.gamma(x, z[, j])$p.value
+  k <- sim_obj$params$sp * d_z
+  # Entner function
+  entner <- function(b) {
+    z_idx <- sample(d_z, k)
+    z_b <- z[, z_idx]
+    in_loop <- function(j) {
+      w <- z[, j]
+      if (linear == TRUE) {
+        ### RULE 1 ###
+        pmat0 <- suppressWarnings(pcor(cbind(y, w, z_b))$p.value)
+        p1.i <- pmat0[1, 2]
+        pmat1 <- suppressWarnings(pcor(cbind(y, w, z_b, x))$p.value)
+        p1.ii <- pmat1[1, 2]
+        ### RULE 2 ###
+        pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
+        p2.i <- pmat2[1, 2]
+        pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
+        p2.ii <- pmat3[1, 2]
+      } else {
+        ### RULE 1 ###
+        d_zb <- ncol(z_b)
+        dat <- cbind(y, w, z_b)
+        p1.i <- kernelCItest(
+          x = 1, y = 2, S = 3:(d_zb + 2),
+          suffStat = list(data = dat, ic.method = 'hsic.gamma')
+        )
+        dat <- cbind(y, w, z_b, x)
+        p1.ii <- kernelCItest(
+          x = 1, y = 2, S = 3:(d_zb + 3),
+          suffStat = list(data = dat, ic.method = 'hsic.gamma')
+        )
+        ### RULE 2 ###
+        dat <- cbind(y, x, z_b)
+        p2.i <- kernelCItest(
+          x = 1, y = 2, S = 3:(d_zb + 2),
+          suffStat = list(data = dat, ic.method = 'hsic.gamma')
+        )
+        dat <- cbind(x, w, z_b)
+        p2.ii <- kernelCItest(
+          x = 1, y = 2, S = 3:(d_zb + 2),
+          suffStat = list(data = dat, ic.method = 'hsic.gamma')
+        )
+      }
+      # Apply rules
+      r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
+      r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
+      # Export
+      out <- data.table(r1, r2)
+      return(out)
     }
-    # Apply rules
-    r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
-    r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
-    # Export
-    out <- data.table(j, r1, r2)
+    omega <- seq_len(d_z)[-z_idx]
+    out <- foreach(jj = sample(omega, 20), .combine = rbind) %do% 
+      in_loop(jj)
+    return(out)
   }
-  df <- foreach(jj = seq_len(ncol(z)), .combine = rbind) %do%
-    entnerish(jj)
-  out <- data.table(
-    method = 'constr', h, 
-    g = ifelse(df[, sum(r1) > sum(r2)], 'xy', 'ci')
-  )
+  # Apply Entner's rules with 50 random subsets and 20 candidates per subset
+  df <- foreach(bb = seq_len(50), .combine = rbind) %do%
+    entner(bb)
+  # Selecting different decision thresholds based on experimentation
+  if (df[, sum(r1) / .N] > 1/200) {
+    g <- 'xy'
+  } else if (df[, sum(r2) / .N] > 1/4) {
+    g <- 'ci'
+  } else {
+    g <- NA_character_
+  }
+  out <- data.table(method = 'constr', h, g)
   return(out)
 }
 
 #' @param x Design matrix.
 #' @param y Response vector.
-#' @param trn Training index.
-#' @param tst Test index.
 #' @param f Function class.
 
-# RMSE-scoring subroutine
-rmse_fn <- function(x, y, trn, tst, f) {
-  if (f == 'lasso') {
-    fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
-    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
-  } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
-                  num.trees = 200, num.threads = 1)
-    yhat_f0 <- predict(fit, data = x[tst, ], 
-                       num.trees = 50, num.threads = 1)$predictions
-    vimp <- data.frame('feature' = colnames(x), 
-                       'imp' = fit$variable.importance) %>%
-      arrange(desc(imp))
-    s <- subsets(m = 10, max_d = d_z, min_d = 5, decay = 2)
-    y_hat <- sapply(seq_along(s), function(k) {
-      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
-      predict(tmp_f, data = x[tst, ], num.threads = 1)$predictions
-    })
-    y_hat <- cbind(y_hat, yhat_f0)
-  }
-  epsilon <- y_hat - y[tst]
-  mse <- colMeans(epsilon^2)
-  rmse <- sqrt(mse[which.min(mse)])
-  return(rmse)
+# MSE-scoring subroutine
+mse_fn <- function(x, y, f) {
+  # Split training, validation, and test sets
+  trn <- sample(n, size = round(0.8 * n))
+  val <- sample(seq_len(n)[-trn], size = round(0.1 * n))
+  tst <- setdiff(seq_len(n), c(trn, val))
+  # Fit model, choose lambda
+  fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
+  y_hat <- predict(fit, newx = x[val, ], s = fit$lambda)
+  eps_val <- y_hat - y[val]
+  mse <- colMeans(eps_val^2)
+  k <- which.min(mse)
+  # Evaluate, export
+  eps_tst <- predict(fit, newx = x[tst, ], s = fit$lambda[k]) - y[tst]
+  err <- mean(eps_tst^2)
+  return(err)
 }
 
 #' @param h If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
@@ -432,24 +451,21 @@ score_fn <- function(sim_obj, h) {
   if (h == 'h0') y <- dat$y0 else y <- dat$y1
   # Pick right f
   f <- ifelse(linear, 'lasso', 'rf')
-  # Split training and test
-  trn <- sample(n, size = round(0.8 * n))
-  tst <- seq_len(n)[-trn]
   # Score X -> Y
-  rmse_xy <- rmse_fn(cbind(z, x), y, trn, tst, f)
+  mse_xy <- mse_fn(cbind(z, x), y, f)
   # Score Y -> X
-  rmse_yx <- rmse_fn(cbind(z, y), x, trn, tst, f)
+  mse_yx <- mse_fn(cbind(z, y), x, f)
   # Score X ~ Y
-  rmse_x <- rmse_fn(z, x, trn, tst, f)
-  rmse_y <- rmse_fn(z, y, trn, tst, f)
+  mse_x <- mse_fn(z, x, f)
+  mse_y <- mse_fn(z, y, f)
   # Summarize
   df <- data.table(
-    h, rmse = c(rmse_x + rmse_xy, rmse_y + rmse_yx, rmse_x + rmse_y),
+    h, mse = c(mse_x + mse_xy, mse_y + mse_yx, mse_x + mse_y),
     g = c('xy', 'yx', 'ci')
   )
   # Export
   out <- data.table(
-    method = 'score', h, g = df[which.min(rmse), g]
+    method = 'score', h, g = df[which.min(mse), g]
   )
   return(out)
 }
@@ -469,7 +485,7 @@ big_loop <- function(sims_df, sim_id, i) {
     cbr_fn(sim_obj, hh, eps = 0.25)
   # Constraint function
   df_c <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do% 
-    constr_fn(sim_obj, hh, alpha = 0.05, tau = 0.75)
+    constr_fn(sim_obj, hh, alpha = 0.1, tau = 0.5)
   # Score function
   df_s <- foreach(sim_obj, hh = c('h0', 'h1'), .combine = rbind) %do%
     score_fn(sim_obj, hh)
@@ -480,19 +496,19 @@ big_loop <- function(sims_df, sim_id, i) {
   # Check in
   if (i == 100) {
     print(paste('s_id =', sim_id, 'complete.\n', 
-                max(sims_df$s_id) - sim_id, 'more to go...'))
+                max(sims_df$s_id) - sim_id, 'more to go...\n'))
   }
   return(out)
 }
 
 # Execute in parallel
-sims <- expand.grid(n = c(500, 1000, 2000), sp = c(0.25, 0.5, 0.75)) %>%
+sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75)) %>%
   mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
-
+fwrite(res, './results/biv_benchmark.csv')
 
 
 
