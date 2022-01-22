@@ -46,6 +46,24 @@ loco_test <- function(x, y, z, f) {
 }
 
 
+
+gcm_test <- function(x, y, z, trn, tst) {
+  rf1 <- randomForest(z[trn, ], x[trn], ntree = 200)
+  rf2 <- randomForest(z[trn, ], y[trn], ntree = 200)
+  eps1 <- x[tst] - predict(rf1, z[tst, ])
+  eps2 <- y[tst] - predict(rf2, z[tst, ])
+  nn <- length(tst)
+  R <- eps1 * eps2
+  R.sq <- R^2
+  meanR <- mean(R)
+  z_score <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
+  p.value <- 2 * pnorm(abs(z_score), lower.tail = FALSE)
+  return(p.value)
+}
+
+
+
+
 # With GCM
 f_x <- lm(x ~ z)
 f_y <- lm(y ~ z)
