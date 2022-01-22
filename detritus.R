@@ -1,4 +1,13 @@
 
+# Check in
+msg <- paste('s_id =', sim_id, 'complete.\n', 
+             max(sims_df$s_id) - sim_id, 'more to go...\n')
+if (sdf$lin_pr == 1 & i == 100) {
+  cat(msg)
+} else if (sdf$lin_pr != 1 & i == 50) {
+  cat(msg)
+}
+
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param B Number of complementary pairs to draw for stability selection.
 

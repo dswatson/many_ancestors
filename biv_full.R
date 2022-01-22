@@ -332,7 +332,7 @@ cbr_fn <- function(dgp, sim_obj, eps) {
     }
   }
   # Export
-  out <- data.table(method = 'cbr', h = 'dgp', g = decision) 
+  out <- data.table(method = 'cbr', g = decision) 
   return(out)
 }
 
@@ -429,7 +429,7 @@ constr_fn <- function(dgp, sim_obj, alpha, tau) {
   } else {
     g <- NA_character_
   }
-  out <- data.table(method = 'constr', h = dgp, g)
+  out <- data.table(method = 'constr', g)
   return(out)
 }
 
@@ -485,7 +485,7 @@ score_fn <- function(dgp, sim_obj) {
     g = c('xy', 'yx', 'ci')
   )
   # Export
-  out <- data.table(method = 'score', h = dgp, g = df[which.min(mse), g])
+  out <- data.table(method = 'score', g = df[which.min(mse), g])
   return(out)
 }
 
@@ -508,13 +508,8 @@ big_loop <- function(sims_df, sim_id, i) {
   df_s <- score_fn(dd, sim_obj)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
-    mutate(s_id = sim_id, dgp = dd, idx = i) %>%
+    mutate(oracle = dd, s_id = sim_id, idx = i) %>%
     as.data.table(.)
-  # Check in
-  if (i == 100) {
-    cat(paste('s_id =', sim_id, 'complete.\n', 
-        max(sims_df$s_id) - sim_id, 'more to go...\n'))
-  }
   return(out)
 }
 
