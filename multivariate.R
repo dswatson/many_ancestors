@@ -141,29 +141,29 @@ l0 <- function(x, y, trn, tst, f) {
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
     betas <- coef(fit, s = fit$lambda)[-1, ]
   } else if (f == 'rf') {
-    fit <- randomForest(x[trn, ], y[trn], ntree = 200)
-    yhat_f0 <- predict(fit, newdata = x[tst, ], 
-                       predict.all = TRUE)$individual[, sample(200, 50)]
+    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
+                  num.trees = 200, num.threads = 1)
+    yhat_f0 <- predict(fit, data = x[tst, ], 
+                       num.trees = 50, num.threads = 1)$predictions
     vimp <- data.frame('feature' = colnames(x), 
-                       'imp' = as.numeric(importance(fit))) %>%
+                       'imp' = fit$variable.importance) %>%
       arrange(desc(imp))
+    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
+    y_hat <- sapply(seq_along(s), function(k) {
+      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
+      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
+      predict(tmp_f, data = x[tst, ], num.threads = 1)$predictions
+    })
+    y_hat <- cbind(y_hat, yhat_f0)
     beta <- double(length = ncol(x))
     names(beta) <- colnames(x)
-    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
-    rfe_loop <- function(k) {
-      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- randomForest(tmp_x, y[trn], ntree = 50)
-      tmp_v <- data.frame('feature' = colnames(tmp_x), 
-                          'imp' = as.numeric(importance(tmp_f)))
-      beta[tmp_v$feature] <- tmp_v$imp
-      out <- list('y_hat' = predict(tmp_f, newdata = x[tst, ]), 'beta' = beta)
+    betas <- sapply(seq_along(s), function(k) {
+      out <- beta
+      keep <- vimp$feature[seq_len(s[k])]
+      out[keep] <- 1
       return(out)
-    }
-    rf_out <- foreach(kk = seq_along(s)) %do% rfe_loop(kk)
-    y_hat <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$y_hat)
-    y_hat <- cbind(y_hat, yhat_f0)
-    betas <- sapply(seq_along(rf_out), function(k) rf_out[[k]]$beta)
-    betas <- cbind(betas, as.numeric(importance(fit))[seq_len(ncol(x))])
+    })
+    betas <- cbind(betas, rep(1, ncol(x)))
   }
   epsilon <- y_hat - y[tst]
   mse <- colMeans(epsilon^2)
@@ -416,10 +416,13 @@ a <- microbenchmark(b = foreach(ss = 1:27, .combine = rbind) %do%
 
 
 # Compute in parallel
-res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(10), .combine = rbind) %dopar%
-  big_loop(sims, ss, ii)
+res <- foreach(ss = sims$s_id, .combine = rbind) %dopar%
+  big_loop(sims, ss, 1)
 res[, hit_rate := sum(yhat) / .N, by = s_id]
+res <- unique(res[, .(s_id, y, hit_rate)])
+res <- merge(res, sims, by = 's_id')
+fwrite(res, lab)
+
 
 
 
