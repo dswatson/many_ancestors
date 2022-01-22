@@ -169,10 +169,10 @@ sims <- expand.grid(
 # Linear?
 if (linear == TRUE) {
   sims$lin_pr <- 1
-  lab <- 'linear_sim.csv'
+  lab <- 'linear_benchmark.csv'
 } else {
   sims$lin_pr <- 1/5
-  lab <- 'nonlinear_sim.csv'
+  lab <- 'nonlinear_benchmark.csv'
 }
 # Index, data table-ify
 sims$s_id <- seq_len(nrow(sims))
@@ -182,6 +182,23 @@ sims <- as.data.table(sims)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
+
+# Aggregate
+df <- res
+df[, ci := sum(g == 'ci') / .N, by = .(method, s_id, h)]
+df[, xy := sum(g == 'xy') / .N, by = .(method, s_id, h)]
+df[, yx := sum(g == 'yx') / .N, by = .(method, s_id, h)]
+df <- unique(df[, .(s_id, method, h, ci, xy, yx)])
+df <- merge(df, sims, by = 's_id')
+
+
+
+# Pick: d_z = 100, sp = 0.5, r2 = 2/3, rho = 0.25. N varies.
+# For each of 100 rounds, run CBR (confounder blanket regression)
+# vs constraint and score-based alternatives
+
+
+
 
 
 
