@@ -9,7 +9,6 @@ library(data.table)
 library(glmnet)
 library(ranger)
 library(ppcor)
-library(kpcalg)
 library(tidyverse)
 library(doMC)
 registerDoMC(16)
@@ -23,11 +22,13 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param sp Sparsity of the connections from background to foreground.
 #' @param r2 Proportion of variance explained by endogenous features.
 #' @param lin_pr Probability that an edge denotes a linear relationship.
+#' @param oracle Expected output of an independence oracle, one of \code{"xy"},
+#'   \code{"ci"}, or \code{"na"}.
 #' 
 #' @import data.table
 
 # Data simulation function
-sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
+sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
   var_z <- 1 / d_z # Does this make a difference?
@@ -65,22 +66,36 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr) {
     noise <- rnorm(n, sd = sqrt(var_noise))
     return(noise)
   }
-  ### Null scenario: X \indep Y | Z
+  # X data
   x <- signal_x + sim_noise(signal_x, r2)
-  y0 <- signal_y + sim_noise(signal_y, r2)
-  ### Alternative scenario: X -> Y
-  signal_z_to_y <- signal_y
-  xzr <- 1 / (k + 1)
-  sigma_xy <- sqrt(xzr * var(signal_z_to_y))
-  gamma_x <- sigma_xy / sd(x)
-  signal_y <- signal_z_to_y + x * gamma_x
-  y1 <- signal_y + sim_noise(signal_y, r2)
+  # Identifiable?
+  if (oracle == 'na') {
+    oracle2 <- ifelse(rbinom(1, 1, 0.5) == 1, 'xy', 'ci')
+    shared_parents <- which(beta != 0 & gamma != 0)
+    keep <- sample(shared_parents, size = length(shared_parents)/2)
+    z <- z[, keep]
+    d_z <- ncol(z)
+  } else {
+    oracle2 <- 'blah'
+  }
+  # Y data
+  if (oracle == 'xy' | oracle2 == 'xy') {
+    y <- signal_y + sim_noise(signal_y, r2)
+  } else if (oracle == 'ci' | oracle2 == 'ci') {
+    signal_z_to_y <- signal_y
+    xzr <- 1 / (k + 1)
+    sigma_xy <- sqrt(xzr * var(signal_z_to_y))
+    gamma_x <- sigma_xy / sd(x)
+    signal_y <- signal_z_to_y + x * gamma_x
+    y <- signal_y + sim_noise(signal_y, r2)
+  }
   # Export
   params <- list(
-    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr
+    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr,
+    'oracle' = oracle
   )
   out <- list(
-    'dat' = data.table(z, 'x' = x, 'y0' = y0, 'y1' = y1),
+    'dat' = data.table(z, 'x' = x, 'y' = y),
     'wts' = list('beta' = beta, 'gamma' = gamma), 'params' = params
   )
   return(out)
@@ -156,7 +171,7 @@ l0 <- function(x, y, trn, tst, f) {
 #' @import foreach
 
 # Compute (de)activation rates for X -> Y and Y -> X
-rate_fn <- function(sim_obj, hyp, B) {
+rate_fn <- function(sim_obj, B) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
@@ -164,7 +179,7 @@ rate_fn <- function(sim_obj, hyp, B) {
   d_z <- ncol(z)
   x <- dat$x
   zx <- cbind(z, x)
-  if (hyp == 'h0') y <- dat$y0 else y <- dat$y1
+  y <- dat$y
   zy <- cbind(z, y)
   # Linear or nonlinear?
   f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
@@ -197,7 +212,7 @@ rate_fn <- function(sim_obj, hyp, B) {
     extras <- c(d_z + 1, 2 * (d_z + 1))
     d_xy[extras] <- a_xy[extras] <- d_yx[extras] <- a_yx[extras] <- NA_real_
     # Export
-    out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_z + 1), h = hyp, 
+    out <- data.table(b = rep(c(2 * b - 1, 2 * b), each = d_z + 1), 
                       dis, d_xy, a_xy, d_yx, a_yx,
                       z = rep(seq_len(d_z + 1), times = 2))
     return(out)
@@ -211,21 +226,20 @@ rate_fn <- function(sim_obj, hyp, B) {
   out[, dryx := sum(d_yx) / .N, by = z]
   out[, aryx := sum(a_yx) / .N, by = z]
   # Tidy up, export
-  out <- unique(out[, .(h, z, disr, drxy, arxy, dryx, aryx)])
+  out <- unique(out[, .(z, disr, drxy, arxy, dryx, aryx)])
   return(out)
 }
 
 #' @param res Results object output by \code{rate_fn}.
-#' @param hyp If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
 #' @import data.table
 #' @import foreach
 
 # Compute consistency lower bound
-lb_fn <- function(res, hyp, B) {
+lb_fn <- function(res, B) {
   # Subset the data
-  df <- na.omit(res[h == hyp, .(z, drxy, arxy, dryx, aryx)])
+  df <- na.omit(res[, .(z, drxy, arxy, dryx, aryx)])
   # Loop through thresholds
   lies <- function(tau) {
     # Internal consistency
@@ -248,14 +262,11 @@ lb_fn <- function(res, hyp, B) {
   min_int <- lie_df[int_err == 0, min(tau)]
   min_ext <- lie_df[ext_err == 0, min(tau)]
   min_two <- lie_df[int_err == 0 & ext_err == 0, min(tau)] # It's always ext
-  # Export
-  out <- data.table('h' = hyp, min_two)
-  return(out)
+  return(min_two)
 }
 
 #' @param res Results object output by \code{rate_fn}.
-#' @param cons_tbl Consistency table output by \code{lb_fn}.
-#' @param hyp If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
+#' @param lb Lower bound output by \code{lb_fn}.
 #' @param order Assume X \preceq Y or Y \preceq X?
 #' @param rule Detect via deactivation (\code{"R1"}) or activation (\code{"R2"})?
 #' @param B Number of complementary pairs to draw for stability selection.
@@ -264,20 +275,18 @@ lb_fn <- function(res, hyp, B) {
 #' @import data.table
 
 # Infer causal direction using stability selection
-ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
+ss_fn <- function(res, lb, order, rule, B) {
   # Subset the data
   if (order == 'xy' & rule == 'R1') {
-    r <- res[h == hyp, drxy]
+    r <- res$drxy 
   } else if (order == 'xy' & rule == 'R2') {
-    r <- res[h == hyp, arxy]
+    r <- res$arxy 
   } else if (order == 'yx' & rule == 'R1') {
-    r <- res[h == hyp, dryx]
+    r <- res$dryx 
   } else if (order == 'yx' & rule == 'R2') {
-    r <- res[h == hyp, aryx]
+    r <- res$aryx 
   }
   r <- na.omit(r)
-  # Find consistency lower bound
-  lb <- cons_tbl[h == hyp, min_two]
   # Stability selection parameters
   theta <- mean(r)
   ub <- minD(theta, B) * sum(r <= theta)
@@ -291,25 +300,29 @@ ss_fn <- function(res, cons_tbl, hyp, order, rule, B) {
     mutate(surplus = ifelse(detected > err_bound, 1, 0))
   # Export
   out <- data.table(
-    'h' = hyp, 'order' = order, 'rule' = rule, 
+    'order' = order, 'rule' = rule, 
     'decision' = ifelse(sum(dat$surplus) > 0, 1, 0)
   )
   return(out)
 }
 
+#' @param dgp Data generating process as determined by the oracle.
+#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param eps Omission threshold.
+
 # Wrap it up
-cbr_fn <- function(sim, hyp, eps) {
-  # Compute rates for each z, h
-  res <- rate_fn(sim, hyp, B = 50)
+cbr_fn <- function(dgp, sim_obj, eps) {
+  # Compute rates for each z
+  res <- rate_fn(sim_obj, B = 50)
   # Disconnected?
   if (res$disr[1] > eps) {
     decision <- 'ci'
   } else {
     # (De)activation rates
-    cons_tbl <- lb_fn(res, res$h[1], B = 50)
+    lb <- lb_fn(res, B = 50)
     sum_tbl <- foreach(oo = c('xy', 'yx'), .combine = rbind) %:%
       foreach(rr = c('R1', 'R2'), .combine = rbind) %do%
-      ss_fn(res, cons_tbl, res$h[1], oo, rr, B = 50)
+      ss_fn(res, lb, oo, rr, B = 50)
     if (sum_tbl[order == 'xy', sum(decision)] > 0) {
       decision <- 'xy'
     } else if (sum_tbl[order == 'yx', sum(decision)] > 0) {
@@ -319,9 +332,7 @@ cbr_fn <- function(sim, hyp, eps) {
     }
   }
   # Export
-  out <- data.table(
-    method = 'cbr', h = hyp, g = decision
-  ) 
+  out <- data.table(method = 'cbr', h = 'dgp', g = decision) 
   return(out)
 }
 
@@ -329,22 +340,44 @@ cbr_fn <- function(sim, hyp, eps) {
 
 ### OTHER METHODS ###
 
-#' @param h If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
+#' @param x First vector.
+#' @param y Second vector.
+#' @param z Conditioning set.
+#' @param trn Training index.
+#' @param tst Test index.
+
+# GCM subroutine (Shah & Peters 2020)
+gcm_test <- function(x, y, z, trn, tst) {
+  rf1 <- ranger(x = z[trn, ], y = x[trn], num.trees = 50, num.threads = 1)
+  rf2 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
+  eps1 <- x[tst] - predict(rf1, z[tst, ], num.threads = 1)$predictions
+  eps2 <- y[tst] - predict(rf2, z[tst, ], num.threads = 1)$predictions
+  nn <- length(tst)
+  R <- eps1 * eps2
+  R.sq <- R^2
+  meanR <- mean(R)
+  z_score <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
+  p.value <- 2 * pnorm(abs(z_score), lower.tail = FALSE)
+  return(p.value)
+}
+
+#' @param dgp Data generating process as determined by the oracle.
+#' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(sim_obj, h, alpha, tau) {
+constr_fn <- function(dgp, sim_obj, alpha, tau) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- dat$x
-  if (h == 'h0') y <- dat$y0 else y <- dat$y1
+  y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
-  k <- sim_obj$params$sp * d_z
+  k <- round(sim_obj$params$sp * d_z)
   # Entner function
   entner <- function(b) {
     z_idx <- sample(d_z, k)
@@ -364,28 +397,13 @@ constr_fn <- function(sim_obj, h, alpha, tau) {
         p2.ii <- pmat3[1, 2]
       } else {
         ### RULE 1 ###
-        d_zb <- ncol(z_b)
-        dat <- cbind(y, w, z_b)
-        p1.i <- kernelCItest(
-          x = 1, y = 2, S = 3:(d_zb + 2),
-          suffStat = list(data = dat, ic.method = 'hsic.gamma')
-        )
-        dat <- cbind(y, w, z_b, x)
-        p1.ii <- kernelCItest(
-          x = 1, y = 2, S = 3:(d_zb + 3),
-          suffStat = list(data = dat, ic.method = 'hsic.gamma')
-        )
+        trn <- sample(n, round(0.8 * n))
+        tst <- seq_len(n)[-trn]
+        p1.i <- gcm_test(y, w, z_b, trn, tst)
+        p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
         ### RULE 2 ###
-        dat <- cbind(y, x, z_b)
-        p2.i <- kernelCItest(
-          x = 1, y = 2, S = 3:(d_zb + 2),
-          suffStat = list(data = dat, ic.method = 'hsic.gamma')
-        )
-        dat <- cbind(x, w, z_b)
-        p2.ii <- kernelCItest(
-          x = 1, y = 2, S = 3:(d_zb + 2),
-          suffStat = list(data = dat, ic.method = 'hsic.gamma')
-        )
+        p2.i <- gcm_test(y, x, z_b, trn, tst)
+        p2.ii <- gcm_test(x, w, z_b, trn, tst)
       }
       # Apply rules
       r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
@@ -395,7 +413,8 @@ constr_fn <- function(sim_obj, h, alpha, tau) {
       return(out)
     }
     omega <- seq_len(d_z)[-z_idx]
-    out <- foreach(jj = sample(omega, 20), .combine = rbind) %do% 
+    if (length(omega) > 20) w <- sample(omega, 20) else w <- omega
+    out <- foreach(jj = w, .combine = rbind) %do% 
       in_loop(jj)
     return(out)
   }
@@ -410,20 +429,18 @@ constr_fn <- function(sim_obj, h, alpha, tau) {
   } else {
     g <- NA_character_
   }
-  out <- data.table(method = 'constr', h, g)
+  out <- data.table(method = 'constr', h = dgp, g)
   return(out)
 }
 
 #' @param x Design matrix.
 #' @param y Response vector.
+#' @param trn Training index.
+#' @param tst Test index.
 #' @param f Function class.
 
 # MSE-scoring subroutine
-mse_fn <- function(x, y, f) {
-  # Split data
-  n <- nrow(x)
-  trn <- sample(n, size = round(0.8 * n))
-  tst <- seq_len(n)[-trn]
+mse_fn <- function(x, y, trn, tst, f) {
   # Fit models
   if (f == 'lasso') {
     fit <- cv.glmnet(x[trn, ], y[trn])
@@ -438,37 +455,37 @@ mse_fn <- function(x, y, f) {
   return(mse)
 }
 
-#' @param h If X -> Y, \code{"h0"}; else if X \indep Y | Z, \code{"h1"}.
+#' @param dgp Data generating process as determined by the oracle.
+#' @param sim_obj Simulation object output by \code{sim_dat}.
 
 # Score function evaluates three different DGPs
-score_fn <- function(sim_obj, h) {
+score_fn <- function(dgp, sim_obj) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- dat$x
+  y <- dat$y
+  # Some hyperparameters
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
-  # Pick right y
-  if (h == 'h0') y <- dat$y0 else y <- dat$y1
-  # Pick right f
+  trn <- sample(n, size = round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   f <- ifelse(linear, 'lasso', 'rf')
   # Score X -> Y
-  mse_xy <- mse_fn(cbind(z, x), y, f)
+  mse_xy <- mse_fn(cbind(z, x), y, trn, tst, f)
   # Score Y -> X
-  mse_yx <- mse_fn(cbind(z, y), x, f)
+  mse_yx <- mse_fn(cbind(z, y), x, trn, tst, f)
   # Score X ~ Y
-  mse_x <- mse_fn(z, x, f)
-  mse_y <- mse_fn(z, y, f)
+  mse_x <- mse_fn(z, x, trn, tst, f)
+  mse_y <- mse_fn(z, y, trn, tst, f)
   # Summarize
   df <- data.table(
-    h, mse = c(mse_x + mse_xy, mse_y + mse_yx, mse_x + mse_y),
+    mse = c(mse_x + mse_xy, mse_y + mse_yx, mse_x + mse_y),
     g = c('xy', 'yx', 'ci')
   )
   # Export
-  out <- data.table(
-    method = 'score', h, g = df[which.min(mse), g]
-  )
+  out <- data.table(method = 'score', h = dgp, g = df[which.min(mse), g])
   return(out)
 }
 
@@ -483,14 +500,14 @@ big_loop <- function(sims_df, sim_id, i) {
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
                      sp = sdf$sp, r2 = sdf$r2, lin_pr = sdf$lin_pr) 
   # Confounder blanket regression
-  df_b <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do%
-    cbr_fn(sim_obj, hh, eps = 0.25)
+  df_b <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do%
+    cbr_fn(dd, sim_obj, eps = 0.25)
   # Constraint function
-  df_c <- foreach(hh = c('h0', 'h1'), .combine = rbind) %do% 
-    constr_fn(sim_obj, hh, alpha = 0.1, tau = 0.5)
+  df_c <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do% 
+    constr_fn(dd, sim_obj, alpha = 0.1, tau = 0.5)
   # Score function
-  df_s <- foreach(sim_obj, hh = c('h0', 'h1'), .combine = rbind) %do%
-    score_fn(sim_obj, hh)
+  df_s <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do%
+    score_fn(dd, sim_obj)
   # Export
   out <- rbind(df_b, df_c, df_s) 
   out[, s_id := sim_id]
@@ -504,13 +521,26 @@ big_loop <- function(sims_df, sim_id, i) {
 }
 
 # Execute in parallel
+
+# Linear:
 sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75)) %>%
-  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, s_id = row_number()) %>%
+  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
-  big_loop(sims, ss, ii)
-fwrite(res, './results/biv_benchmark.csv')
+  big_loop(sims_nl, ss, ii)
+fwrite(res, './results/lin_biv_benchmark.csv')
+
+# Nonlinear:
+sims_nl <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5)) %>%
+  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, s_id = row_number()) %>%
+  as.data.table(.)
+res <- foreach(ss = sims_nl$s_id, .combine = rbind) %:%
+  foreach(ii = seq_len(50), .combine = rbind) %dopar%
+  big_loop(sims_nl, ss, ii)
+fwrite(res, './results/nl_biv_benchmark.csv')
+
+
 
 
 
