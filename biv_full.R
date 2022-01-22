@@ -499,19 +499,17 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, 
                      sp = sdf$sp, r2 = sdf$r2, lin_pr = sdf$lin_pr) 
+  dd <- sdf$oracle
   # Confounder blanket regression
-  df_b <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do%
-    cbr_fn(dd, sim_obj, eps = 0.25)
+  df_b <- cbr_fn(dd, sim_obj, eps = 0.25)
   # Constraint function
-  df_c <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do% 
-    constr_fn(dd, sim_obj, alpha = 0.1, tau = 0.5)
+  df_c <- constr_fn(dd, sim_obj, alpha = 0.1, tau = 0.5)
   # Score function
-  df_s <- foreach(dd = c('xy', 'ci', 'na'), .combine = rbind) %do%
-    score_fn(dd, sim_obj)
+  df_s <- score_fn(dd, sim_obj)
   # Export
-  out <- rbind(df_b, df_c, df_s) 
-  out[, s_id := sim_id]
-  out[, idx := i]
+  out <- rbind(df_b, df_c, df_s) %>%
+    mutate(s_id = sim_id, dgp = dd, idx = i) %>%
+    as.data.table(.)
   # Check in
   if (i == 100) {
     cat(paste('s_id =', sim_id, 'complete.\n', 
@@ -523,16 +521,18 @@ big_loop <- function(sims_df, sim_id, i) {
 # Execute in parallel
 
 # Linear:
-sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75)) %>%
+sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75),
+                    oracle = c('xy', 'ci', 'na')) %>%
   mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
-  big_loop(sims_nl, ss, ii)
+  big_loop(sims, ss, ii)
 fwrite(res, './results/lin_biv_benchmark.csv')
 
 # Nonlinear:
-sims_nl <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5)) %>%
+sims_nl <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5),
+                       oracle = c('xy', 'ci', 'na')) %>%
   mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims_nl$s_id, .combine = rbind) %:%
