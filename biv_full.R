@@ -91,8 +91,8 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   }
   # Export
   params <- list(
-    'n' = n, 'd_z' = d_z, 'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr,
-    'oracle' = oracle
+    'n' = n, 'd_z' = d_z, 'd_u' = ifelse(oracle == 'na', length(u), NULL),
+    'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr, 'oracle' = oracle
   )
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y' = y),
@@ -381,7 +381,8 @@ constr_fn <- function(dgp, sim_obj, alpha, tau) {
   x <- dat$x
   y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
-  k <- round(sim_obj$params$sp * d_z)
+  fctr <- ifelse(dgp == 'na', d_z + sim_obj$params$d_u, d_z)
+  k <- round(sim_obj$params$sp * fctr)
   # Entner function
   entner <- function(b) {
     z_idx <- sample(d_z, k)
@@ -530,9 +531,10 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
 fwrite(res, './results/lin_biv_benchmark.csv')
 
 # Nonlinear:
-sims_nl <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5),
+sims_nl <- expand.grid(n = c(1000, 2000, 4000), 
                        oracle = c('xy', 'ci', 'na')) %>%
-  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, s_id = row_number()) %>%
+  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, sp = 0.5, 
+         s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims_nl$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(50), .combine = rbind) %dopar%

@@ -7,6 +7,7 @@ library(data.table)
 library(geneNetBP)
 library(matrixStats)
 library(glmnet)
+library(bestsubset)
 library(tidyverse)
 library(doMC)
 registerDoMC(8)
@@ -14,37 +15,120 @@ registerDoMC(8)
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
 
-# Import data
-data(hdl)
 
-# Create noisy SNPs
-n <- nrow(hdl)
-probs <- runif(50)
-snps <- matrix(rbinom(n * 50, 1, prob = probs), ncol = 50, byrow = TRUE,
-               dimnames = list(NULL, paste0('snp', seq_len(50))))
+#' @param x Design matrix.
+#' @param y Outcome vector.
+#' @param trn Training indices.
+#' @param tst Test indices.
+#' @param f Regression method.
 
-# Background variables
-z <- hdl %>%
-  select(starts_with('c')) %>%
-  cbind(snps)
+# Fit regressions, return bit vector for feature selection.
+l0 <- function(x, y, trn, tst, f) {
+  if (f == 'lasso') {
+    fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
+    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
+    betas <- coef(fit, s = fit$lambda)[-1, ]
+  } else if (f == 'step') {
+    fit <- fs(x[trn, ], y[trn], intercept = FALSE, verbose = FALSE)
+    y_hat <- predict(fit, newx = x[tst, ])
+    betas <- coef(fit)[1:ncol(x), ]
+  }
+  epsilon <- y_hat - y[tst]
+  mse <- colMeans(epsilon^2)
+  betas <- betas[, which.min(mse)]
+  out <- ifelse(betas == 0, 0, 1)
+  return(out)
+}
 
-# Foreground variables
-x <- hdl %>%
-  select(-starts_with('c'), -HDL)
+
+#' @param df Table of (de)activation rates.
+#' @param B Number of complementary pairs to draw for stability selection.
+
+# Compute consistency lower bound
+lb_fn <- function(df, B) {
+  # Loop through thresholds
+  lies <- function(tau) {
+    # Internal consistency
+    df[, dji := ifelse(drji >= tau, 1, 0)]
+    df[, aji := ifelse(arji >= tau, 1, 0)]
+    df[, dij := ifelse(drij >= tau, 1, 0)]
+    df[, aij := ifelse(arij >= tau, 1, 0)]
+    df[, int_err := ifelse((dji + aji > 1) | (dij + aij > 1), 1, 0)]
+    int_err <- sum(df$int_err)
+    # External consistency
+    sum_ji <- df[, sum(dji + aji)]
+    sum_ij <- df[, sum(dij + aij)]
+    ext_err <- ifelse(min(c(sum_ji, sum_ij)) > 0, 1, 0)
+    # Export
+    out <- data.table('tau' = tau, 'int_err' = int_err, 'ext_err' = ext_err)
+  }
+  lie_df <- foreach(tt = seq_len(2 * B) / (2 * B), .combine = rbind) %do% 
+    lies(tt)
+  # Compute minimal thresholds
+  min_int <- lie_df[int_err == 0, min(tau)]
+  min_ext <- lie_df[ext_err == 0, min(tau)]
+  min_two <- lie_df[int_err == 0 & ext_err == 0, min(tau)] # It's always ext
+  # Export
+  return(min_two)
+}
+
+
+#' @param df Table of (de)activation rates.
+#' @param lb Consistency lower bound, as computed by \code{lb_fn}.
+#' @param order Causal order of interest, either \code{"ij"} or \code{"ji"}.
+#' @param rule Inference rule, either \code{"R1"} or \code{"R2"}.
+#' @param B Number of complementary pairs to draw for stability selection.
+
+# Infer causal direction using stability selection
+ss_fn <- function(df, lb, order, rule, B) {
+  # Find the right rate
+  if (order == 'ji' & rule == 'R1') {
+    r <- df[, drji]
+  } else if (order == 'ji' & rule == 'R2') {
+    r <- df[, arji]
+  } else if (order == 'ij' & rule == 'R1') {
+    r <- df[, drij]
+  } else if (order == 'ij' & rule == 'R2') {
+    r <- df[, arij]
+  } 
+  # Stability selection parameters
+  theta <- mean(r)
+  ub <- minD(theta, B) * sum(r <= theta)
+  tau <- seq_len(2 * B) / (2 * B)
+  # Do any features exceed the upper bound?
+  dat <- data.frame(tau, err_bound = ub) %>%
+    filter(tau > lb) %>%
+    rowwise() %>%
+    mutate(detected = sum(r >= tau)) %>% 
+    ungroup(.) %>%
+    mutate(surplus = ifelse(detected > err_bound, 1, 0))
+  # Export
+  out <- data.table(
+    'order' = order, 'rule' = rule, 
+    'decision' = ifelse(sum(dat$surplus) > 0, 1, 0)
+  )
+  return(out)
+}
+
+
+#' @param z Matrix of background variables.
+#' @param x Matrix of foreground variables.
+#' @param f Regression method.
+#' @param gamma Omission threshold.
+#' @param maxiter Maximum number of iterations.
+#' @param B Number of complementary pairs to draw for stability selection.
 
 # Subdag discovery algorithm
-subdag <- function(z, x, gamma = 0.25, maxiter = 100, B = 50) {
+subdag <- function(z, x, f, gamma = 0.25, maxiter = 100, B = 50) {
   ### PRELIMINARIES ###
   # Get data, hyperparameters, train/test split
   n <- nrow(z)
   d_z <- ncol(z)
   d_x <- ncol(x)
-  xlabs <- paste0('x', seq_len(d_x))
-  f <- 'lasso'
   # Initialize
   adj_list <- list(
     matrix(NA_real_, nrow = d_x, ncol = d_x, 
-           dimnames = list(xlabs, xlabs))
+           dimnames = list(colnames(x), colnames(x)))
   )
   converged <- FALSE
   iter <- 0
@@ -107,7 +191,7 @@ subdag <- function(z, x, gamma = 0.25, maxiter = 100, B = 50) {
           # Only continue if the set of nondescendants has increased since last 
           # iteration (i.e., have we learned anything new?)
           if (iter == 0 | length(a1) > length(a0)) {
-            df <- foreach(bb = seq_len(B), .combine = rbind) %do%
+            df <- foreach(bb = seq_len(B), .combine = rbind) %dopar%
               sub_loop(bb, i, j, a1)
             # Compute rates
             df[, disr := sum(dis) / .N]
@@ -161,9 +245,31 @@ subdag <- function(z, x, gamma = 0.25, maxiter = 100, B = 50) {
   return(adj_mat)
 }
 
+################################################################################
 
+# Import data
+data(hdl)
 
+# Create noisy SNPs
+n <- nrow(hdl)
+probs <- runif(20)
+snps <- matrix(rbinom(n * 50, 1, prob = probs), ncol = 50, byrow = TRUE,
+               dimnames = list(NULL, paste0('snp', seq_len(50))))
 
+# Background variables
+z <- hdl %>%
+  select(starts_with('c', ignore.case = FALSE)) %>%
+  mutate_all(as.numeric) %>%
+  cbind(snps) %>%
+  as.matrix(.)
+
+# Foreground variables
+x <- hdl %>%
+  select(-starts_with('c', ignore.case = FALSE), -HDL) %>%
+  as.matrix(.)
+
+# Run algorithm
+amat <- subdag(z, x, f = 'step')
 
 
 
