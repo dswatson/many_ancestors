@@ -70,18 +70,18 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   x <- signal_x + sim_noise(signal_x, r2)
   # Identifiable?
   if (oracle == 'na') {
-    oracle2 <- ifelse(rbinom(1, 1, 0.5) == 1, 'xy', 'ci')
     shared_parents <- which(beta != 0 & gamma != 0)
-    u <- sample(shared_parents, size = length(shared_parents)/2)
-    z <- z[, -u]
+    u_idx <- sample(shared_parents, size = length(shared_parents)/2)
+    z <- z[, -u_idx]
     d_z <- ncol(z)
+    d_u <- length(u_idx)
   } else {
-    oracle2 <- 'blah'
+    d_u <- 0
   }
   # Y data
-  if (oracle == 'xy' | oracle2 == 'xy') {
+  if (oracle %in% c('ci', 'na')) {
     y <- signal_y + sim_noise(signal_y, r2)
-  } else if (oracle == 'ci' | oracle2 == 'ci') {
+  } else if (oracle == 'xy') {
     signal_z_to_y <- signal_y
     xzr <- 1 / (k + 1)
     sigma_xy <- sqrt(xzr * var(signal_z_to_y))
@@ -89,7 +89,6 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
     signal_y <- signal_z_to_y + x * gamma_x
     y <- signal_y + sim_noise(signal_y, r2)
   }
-  d_u <- ifelse(oracle == 'na', length(u), 0)
   # Export
   params <- list(
     'n' = n, 'd_z' = d_z, 'd_u' = d_u, 'rho' = rho, 'sp' = sp, 'r2' = r2, 
@@ -231,6 +230,7 @@ rate_fn <- function(sim_obj, B) {
   return(out)
 }
 
+
 #' @param res Results object output by \code{rate_fn}.
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
@@ -265,6 +265,7 @@ lb_fn <- function(res, B) {
   min_two <- lie_df[int_err == 0 & ext_err == 0, min(tau)] # It's always ext
   return(min_two)
 }
+
 
 #' @param res Results object output by \code{rate_fn}.
 #' @param lb Lower bound output by \code{lb_fn}.
@@ -311,12 +312,12 @@ ss_fn <- function(res, lb, order, rule, B) {
   return(out)
 }
 
-#' @param dgp Data generating process as determined by the oracle.
+
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param eps Omission threshold.
 
 # Wrap it up
-cbr_fn <- function(dgp, sim_obj, eps) {
+cbr_fn <- function(sim_obj, eps) {
   # Compute rates for each z
   res <- rate_fn(sim_obj, B = 50)
   # Disconnected?
@@ -333,7 +334,7 @@ cbr_fn <- function(dgp, sim_obj, eps) {
     } else if (sum_tbl[order == 'yx', sum(decision)] > 0) {
       decision <- 'yx'
     } else {
-      decision <- NA_character_
+      decision <- 'na'
     }
   }
   # Export
@@ -366,14 +367,13 @@ gcm_test <- function(x, y, z, trn, tst) {
   return(p.value)
 }
 
-#' @param dgp Data generating process as determined by the oracle.
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(dgp, sim_obj, alpha, tau) {
+constr_fn <- function(sim_obj, alpha, tau) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
@@ -382,7 +382,7 @@ constr_fn <- function(dgp, sim_obj, alpha, tau) {
   x <- dat$x
   y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
-  fctr <- ifelse(dgp == 'na', d_z + sim_obj$params$d_u, d_z)
+  fctr <- d_z + sim_obj$params$d_u
   k <- round(sim_obj$params$sp * fctr)
   # Entner function
   entner <- function(b) {
@@ -433,11 +433,12 @@ constr_fn <- function(dgp, sim_obj, alpha, tau) {
   } else if (df[, sum(r2) / .N] > 1/4) {
     g <- 'ci'
   } else {
-    g <- NA_character_
+    g <- 'na'
   }
   out <- data.table(method = 'constr', g)
   return(out)
 }
+
 
 #' @param x Design matrix.
 #' @param y Response vector.
@@ -461,11 +462,11 @@ mse_fn <- function(x, y, trn, tst, f) {
   return(mse)
 }
 
-#' @param dgp Data generating process as determined by the oracle.
+
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 
 # Score function evaluates three different DGPs
-score_fn <- function(dgp, sim_obj) {
+score_fn <- function(sim_obj) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
@@ -504,17 +505,16 @@ big_loop <- function(sims_df, sim_id, i) {
   # Simulate data, extract ground truth
   sdf <- sims_df[s_id == sim_id]
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle) 
-  dd <- sdf$oracle
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
   # Confounder blanket regression
-  df_b <- cbr_fn(dd, sim_obj, eps = 0.25)
+  df_b <- cbr_fn(sim_obj, eps = 0.25)
   # Constraint function
-  df_c <- constr_fn(dd, sim_obj, alpha = 0.1, tau = 0.5)
+  df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5)
   # Score function
-  df_s <- score_fn(dd, sim_obj)
+  df_s <- score_fn(sim_obj)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
-    mutate(oracle = dd, s_id = sim_id, idx = i) %>%
+    mutate(s_id = sim_id, idx = i) %>%
     as.data.table(.)
   return(out)
 }
