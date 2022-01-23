@@ -10,10 +10,10 @@ library(pcalg)
 library(RBGL)
 library(matrixStats)
 library(glmnet)
-library(randomForest)
+library(ranger)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -120,8 +120,6 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
 
 # Precompute subset sizes for RFE
 subsets <- function(m, max_d, decay, d_x) {
-  out <- 2:d_x
-  
   out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
   out <- na.omit(unique(out)[seq_len(m)])
   return(out)
@@ -381,6 +379,66 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
   return(adj_mat)
 }
 
+################################################################################
+
+# Benchmark against RFCI and GES
+
+rfci_fn <- function(sim_obj) {
+  # Extract data
+  dat <- sim$dat
+  n <- nrow(dat)
+  z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
+  x <- as.matrix(select(dat, starts_with('x')))
+  d_x <- ncol(x)
+  k <- round(sim$params$sp * d_z)
+  # Gap matrix ensures we don't compute intra-Z edges
+  rng <- (d_z + 1):(d_z + d_x)
+  gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
+  gps[rng, ] <- gps[, rng] <- FALSE
+  # RFCI
+  rho_list <- list(C = cor(dat), n = n)
+  rfci_out <- rfci(rho_list, indepTest = gaussCItest, alpha = 0.1, 
+                   labels = c(colnames(z), colnames(x)), 
+                   skel.method = 'stable.fast',
+                   fixedGaps = gps, m.max = k, numCores = 8)
+  amat <- rfci_out@amat[rng, rng]
+  return(amat)
+}
+
+ges_fn <- function(sim_obj) {
+  # Extract data
+  dat <- sim$dat
+  n <- nrow(dat)
+  z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
+  x <- as.matrix(select(dat, starts_with('x')))
+  d_x <- ncol(x)
+  k <- round(sim$params$sp * d_z)
+  # Gap matrix ensures we don't compute intra-Z edges
+  rng <- (d_z + 1):(d_z + d_x)
+  gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
+  gps[rng, ] <- gps[, rng] <- FALSE
+  # GES
+  score <- new('GaussL0penObsScore', dat) # BCI
+  ges_out <- ges(score, labels = score$getNodes(), maxDegree = k,
+                 fixedGaps = gps, phase = c('forward', 'backward'),
+                 iterate = FALSE) # Original Chickering algorithm
+  in_edges <- ges_out$essgraph$.in.edges[rng]
+  in_edges <- lapply(seq_along(in_edges), function(k) in_edges[[k]] - d_z)
+  ges_amat <- matrix(0, nrow = d_x, ncol = d_x,
+                     dimnames = list(colnames(x), colnames(x)))
+  for (i in 2:d_x) {
+    for (j in 1:(i - 1)) {
+      if (j %in% in_edges[[i]]) {
+        ges_amat[i, j] <- 1
+      }
+    }
+  }
+  return(ges_amat)
+}
+
+################################################################################
 
 ### SIMULATION GRID ###
 # Simulation grid (linear)
