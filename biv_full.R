@@ -503,6 +503,7 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle) 
+  dd <- sdf$oracle
   # Confounder blanket regression
   df_b <- cbr_fn(dd, sim_obj, eps = 0.25)
   # Constraint function
@@ -511,7 +512,7 @@ big_loop <- function(sims_df, sim_id, i) {
   df_s <- score_fn(dd, sim_obj)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
-    mutate(oracle = sdf$oracle, s_id = sim_id, idx = i) %>%
+    mutate(oracle = dd, s_id = sim_id, idx = i) %>%
     as.data.table(.)
   return(out)
 }
