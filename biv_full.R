@@ -89,10 +89,11 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
     signal_y <- signal_z_to_y + x * gamma_x
     y <- signal_y + sim_noise(signal_y, r2)
   }
+  d_u <- ifelse(oracle == 'na', length(u), 0)
   # Export
   params <- list(
-    'n' = n, 'd_z' = d_z, 'd_u' = ifelse(oracle == 'na', length(u), NULL),
-    'rho' = rho, 'sp' = sp, 'r2' = r2, 'lin_pr' = lin_pr, 'oracle' = oracle
+    'n' = n, 'd_z' = d_z, 'd_u' = d_u, 'rho' = rho, 'sp' = sp, 'r2' = r2, 
+    'lin_pr' = lin_pr, 'oracle' = oracle
   )
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y' = y),
@@ -451,7 +452,7 @@ mse_fn <- function(x, y, trn, tst, f) {
     fit <- cv.glmnet(x[trn, ], y[trn])
     y_hat <- predict(fit, newx = x[tst, ], s = 'lambda.min')
   } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], num.threads = 1)
+    fit <- ranger(x = x[trn, ], y = y[trn], num.trees = 200, num.threads = 1)
     y_hat <- predict(fit, data = x[tst, ], num.threads = 1)$predictions
   }
   # Evaluate errors, export
@@ -521,9 +522,10 @@ big_loop <- function(sims_df, sim_id, i) {
 # Execute in parallel
 
 # Linear:
-sims <- expand.grid(n = c(1000, 2000, 4000), sp = c(0.25, 0.5, 0.75),
+sims <- expand.grid(n = c(1000, 2000, 4000),
                     oracle = c('xy', 'ci', 'na')) %>%
-  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, s_id = row_number()) %>%
+  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, 
+         s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
@@ -533,7 +535,7 @@ fwrite(res, './results/lin_biv_benchmark.csv')
 # Nonlinear:
 sims_nl <- expand.grid(n = c(1000, 2000, 4000), 
                        oracle = c('xy', 'ci', 'na')) %>%
-  mutate(d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, sp = 0.5, 
+  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5,  
          s_id = row_number()) %>%
   as.data.table(.)
 res <- foreach(ss = sims_nl$s_id, .combine = rbind) %:%
