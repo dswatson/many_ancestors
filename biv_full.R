@@ -533,6 +533,7 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
 fwrite(res, './results/lin_biv_benchmark.csv')
 
 # Nonlinear:
+sims$lin_pr <- 1/5
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(50), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
