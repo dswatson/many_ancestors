@@ -520,27 +520,22 @@ big_loop <- function(sims_df, sim_id, i) {
 }
 
 # Execute in parallel
-
-# Linear:
 sims <- expand.grid(n = c(1000, 2000, 4000),
                     oracle = c('xy', 'ci', 'na')) %>%
   mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, 
          s_id = row_number()) %>%
   as.data.table(.)
+
+# Linear:
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
 fwrite(res, './results/lin_biv_benchmark.csv')
 
 # Nonlinear:
-sims_nl <- expand.grid(n = c(1000, 2000, 4000), 
-                       oracle = c('xy', 'ci', 'na')) %>%
-  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5,  
-         s_id = row_number()) %>%
-  as.data.table(.)
-res <- foreach(ss = sims_nl$s_id, .combine = rbind) %:%
+res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(50), .combine = rbind) %dopar%
-  big_loop(sims_nl, ss, ii)
+  big_loop(sims, ss, ii)
 fwrite(res, './results/nl_biv_benchmark.csv')
 
 
