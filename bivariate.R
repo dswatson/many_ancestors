@@ -359,7 +359,8 @@ cbr_fn <- function(sim_obj, gamma) {
 #' @param trn Training index.
 #' @param tst Test index.
 
-# GCM subroutine (Shah & Peters 2020)
+# GCM subroutine (Shah & Peters 2020). Tests conditional independence of 
+# x and y given z using random forest regression.
 gcm_test <- function(x, y, z, trn, tst) {
   rf1 <- ranger(x = z[trn, ], y = x[trn], num.trees = 50, num.threads = 1)
   rf2 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
