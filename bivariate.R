@@ -517,7 +517,7 @@ big_loop <- function(sims_df, sim_id, i) {
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
   # Confounder blanket regression
-  df_b <- cbr_fn(sim_obj, gamma = 0.25) # Check this
+  df_b <- cbr_fn(sim_obj, gamma = 0.5) 
   # Constraint function
   df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
