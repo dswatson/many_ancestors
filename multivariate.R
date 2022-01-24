@@ -10,13 +10,16 @@ library(pcalg)
 library(RBGL)
 library(matrixStats)
 library(glmnet)
-library(ranger)
 library(tidyverse)
 library(doMC)
 registerDoMC(16)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
+
+################################################################################
+
+### SIMULATION ###
 
 #' @param n Sample size.
 #' @param d_z Dimensionality of Z.
@@ -32,6 +35,7 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' 
 
 # Data simulation function
+# Note: lower triangular adj_mat means that column is a parent of row
 sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
   # Simulate background variables
   z <- matrix(rnorm(n * d_z), ncol = d_z)
@@ -111,7 +115,10 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
   out <- list('dat' = data.table(z, x), 'adj_mat' = adj_mat, 'params' = params)
   return(out)
 }
-# Note: lower triangular adj_mat means that column is a parent of row
+
+################################################################################
+
+### CONFOUNDER BLANKET REGRESSION ###
 
 #' @param m Number of nested models to fit.
 #' @param max_d Number of predictors in largest model.
@@ -222,8 +229,7 @@ ss_fn <- function(df, lb, order, rule, B) {
     r <- df[, arij]
   } 
   # Stability selection parameters
-  q <- sum(r)
-  theta <- q / length(r)
+  theta <- mean(r)
   ub <- minD(theta, B) * sum(r <= theta)
   tau <- seq_len(2 * B) / (2 * B)
   # Do any features exceed the upper bound?
@@ -245,10 +251,11 @@ ss_fn <- function(df, lb, order, rule, B) {
 #' @param sim_obj Simulation object as computed by \code{sim_dat}.
 #' @param maxiter Maximum number of iterations to loop through if convergence
 #'   is elusive.
+#' @param gamma Omission threshold.
 #' @param B Number of complementary pairs to draw for stability selection.
 
-# Subdag discovery algorithm
-subdag <- function(sim_obj, maxiter = 100, B = 50) {
+# Subdag discovery via confounder blanket regression
+cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
   ### PRELIMINARIES ###
   # Get data, hyperparameters, train/test split
   dat <- sim_obj$dat
@@ -329,7 +336,7 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
               sub_loop(bb, i, j, a1)
             # Compute rates
             df[, disr := sum(dis) / .N]
-            if (df$disr[1] >= 0.25) { # Totally arbitrary threshold?
+            if (df$disr[1] >= gamma) { 
               adj1[i, j] <- adj1[j, i] <- 0
             } else {
               df[, drji := sum(d_ji) / .N, by = z]
@@ -381,17 +388,17 @@ subdag <- function(sim_obj, maxiter = 100, B = 50) {
 
 ################################################################################
 
-# Benchmark against RFCI and GES
+### RFCI ###
 
 rfci_fn <- function(sim_obj) {
   # Extract data
-  dat <- sim$dat
+  dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
-  k <- round(sim$params$sp * d_z)
+  k <- round(sim_obj$params$sp * d_z)
   # Gap matrix ensures we don't compute intra-Z edges
   rng <- (d_z + 1):(d_z + d_x)
   gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
@@ -400,21 +407,26 @@ rfci_fn <- function(sim_obj) {
   rho_list <- list(C = cor(dat), n = n)
   rfci_out <- rfci(rho_list, indepTest = gaussCItest, alpha = 0.1, 
                    labels = c(colnames(z), colnames(x)), 
-                   skel.method = 'stable.fast',
-                   fixedGaps = gps, m.max = k, numCores = 8)
-  amat <- rfci_out@amat[rng, rng]
-  return(amat)
+                   skel.method = 'original',
+                   fixedGaps = gps, m.max = k)
+  rfci_amat <- rfci_out@amat[rng, rng]
+  # Export
+  return(rfci_amat)
 }
+
+################################################################################
+
+### GES ###
 
 ges_fn <- function(sim_obj) {
   # Extract data
-  dat <- sim$dat
+  dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
-  k <- round(sim$params$sp * d_z)
+  k <- round(sim_obj$params$sp * d_z)
   # Gap matrix ensures we don't compute intra-Z edges
   rng <- (d_z + 1):(d_z + d_x)
   gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
@@ -438,38 +450,48 @@ ges_fn <- function(sim_obj) {
   return(ges_amat)
 }
 
+
 ################################################################################
 
 ### SIMULATION GRID ###
-# Simulation grid (linear)
-sims <- expand.grid(
-  n = c(500, 1000, 2000), d_z = c(50, 100, 200), d_x = c(6, 8, 10), 
-  rho = c(0, 0.5), r2 = c(1/3, 1/2, 2/3), 
-  sp = c(0.25, 0.5, 0.75), method = 'er', pref = 1, lin_pr = 1
+# Simulation grid 
+sims <- data.table(
+  s_id = 1:3, n = c(1000, 2000, 4000), 
+  d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
+  sp = 0.5, method = 'er', pref = 1, 
 )
-sims$s_id <- seq_len(nrow(sims))
-sims <- as.data.table(sims)
-sims[, method := as.character(method)]
 
 big_loop <- function(sims, sim_id, i) {
   # Simulate data
   sdf <- sims[s_id == sim_id]
   sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
-                 r2 = sdf$r2, sp = sdf$sp, method = sdf$method, pref = sdf$pref,
-                 lin_pr = sdf$lin_pr)
-  # Estimate adjacency matrix
-  ahat <- subdag(sim)
+                 r2 = sdf$r2, lin_pr = sdf$lin_pr, 
+                 sp = sdf$sp, method = sdf$method, pref = sdf$pref)
+  # Estimate adjacency matrix via CBR
+  amat_cbr <- cbr_fn(sim_obj)
+  # Estimate adjacency matrix via RFCI
+  amat_rfci <- rfci_fn(sim_obj)
+  # Estimate adjacency matrix via GES
+  amat_ges <- ges_fn(sim_obj)
+  # Note -- these aren't actually adjacency matrices!
   # Export results
   out <- data.table(
-    s_id = sim_id, y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat)
-  ) %>% filter(!is.na(y))
+    s_id = sim_id, idx = i, 
+    amat_cbr = list(amat_cbr), 
+    amat_rfci = list(amat_rfci), 
+    amat_ges = list(amat_ges)
+  )
   return(out)
 }
 
 # How long will this take?
+sim_obj <- sim_dat(1000, 100, 6, 0.25, 2/3, 1, 0.5, 'er', 1)
 library(microbenchmark)
-a <- microbenchmark(b = foreach(ss = 1:27, .combine = rbind) %do%
-                      big_loop(sims, ss, 1), times = 1)
+microbenchmark(
+  cbr = cbr_fn(sim_obj), rfci = rfci_fn(sim_obj), ges = ges_fn(sim_obj),
+  times = 1
+)
+
 
 
 
