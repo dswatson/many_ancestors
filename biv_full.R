@@ -301,7 +301,7 @@ ss_fn <- function(res, lb, order, rule, B) {
       filter(tau > lb) %>%
       rowwise() %>%
       mutate(detected = sum(r >= tau)) %>% 
-      ungroup(.) %>%
+      ungroup() %>%
       mutate(surplus = ifelse(detected > err_bound, 1, 0))
   }
   # Export
@@ -314,14 +314,14 @@ ss_fn <- function(res, lb, order, rule, B) {
 
 
 #' @param sim_obj Simulation object output by \code{sim_dat}.
-#' @param eps Omission threshold.
+#' @param gamma Omission threshold.
 
 # Wrap it up
-cbr_fn <- function(sim_obj, eps) {
+cbr_fn <- function(sim_obj, gamma) {
   # Compute rates for each z
   res <- rate_fn(sim_obj, B = 50)
   # Disconnected?
-  if (res$disr[1] > eps) {
+  if (res$disr[1] > gamma) {
     decision <- 'ci'
   } else {
     # (De)activation rates
@@ -367,13 +367,15 @@ gcm_test <- function(x, y, z, trn, tst) {
   return(p.value)
 }
 
+
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
+#' @param B Number of random subset-variable pairs for testing.
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(sim_obj, alpha, tau) {
+constr_fn <- function(sim_obj, alpha, tau, B) {
   # Get data
   dat <- sim_obj$dat
   n <- nrow(dat)
@@ -383,54 +385,50 @@ constr_fn <- function(sim_obj, alpha, tau) {
   y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
   fctr <- d_z + sim_obj$params$d_u
-  k <- round(sim_obj$params$sp * fctr)
+  k <- round(sim_obj$params$sp * fctr)/2
   # Entner function
   entner <- function(b) {
+    # Sample a random subset Z_b and variable W
     z_idx <- sample(d_z, k)
     z_b <- z[, z_idx]
-    in_loop <- function(j) {
-      w <- z[, j]
-      if (linear == TRUE) {
-        ### RULE 1 ###
-        pmat0 <- suppressWarnings(pcor(cbind(y, w, z_b))$p.value)
-        p1.i <- pmat0[1, 2]
-        pmat1 <- suppressWarnings(pcor(cbind(y, w, z_b, x))$p.value)
-        p1.ii <- pmat1[1, 2]
-        ### RULE 2 ###
-        pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
-        p2.i <- pmat2[1, 2]
-        pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
-        p2.ii <- pmat3[1, 2]
-      } else {
-        ### RULE 1 ###
-        trn <- sample(n, round(0.8 * n))
-        tst <- seq_len(n)[-trn]
-        p1.i <- gcm_test(y, w, z_b, trn, tst)
-        p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
-        ### RULE 2 ###
-        p2.i <- gcm_test(y, x, z_b, trn, tst)
-        p2.ii <- gcm_test(x, w, z_b, trn, tst)
-      }
-      # Apply rules
-      r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
-      r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
-      # Export
-      out <- data.table(r1, r2)
-      return(out)
+    j <- sample(seq_len(d_z)[-z_idx], 1)
+    w <- z[, j]
+    if (linear == TRUE) {
+      ### RULE 1 ###
+      pmat0 <- suppressWarnings(pcor(cbind(y, w, z_b))$p.value)
+      p1.i <- pmat0[1, 2]
+      pmat1 <- suppressWarnings(pcor(cbind(y, w, z_b, x))$p.value)
+      p1.ii <- pmat1[1, 2]
+      ### RULE 2 ###
+      pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
+      p2.i <- pmat2[1, 2]
+      pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
+      p2.ii <- pmat3[1, 2]
+    } else {
+      ### RULE 1 ###
+      trn <- sample(n, round(0.8 * n))
+      tst <- seq_len(n)[-trn]
+      p1.i <- gcm_test(y, w, z_b, trn, tst)
+      p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
+      ### RULE 2 ###
+      p2.i <- gcm_test(y, x, z_b, trn, tst)
+      p2.ii <- gcm_test(x, w, z_b, trn, tst)
     }
-    omega <- seq_len(d_z)[-z_idx]
-    if (length(omega) > 20) w <- sample(omega, 20) else w <- omega
-    out <- foreach(jj = w, .combine = rbind) %do% 
-      in_loop(jj)
+    # Apply rules
+    r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
+    r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
+    # Export
+    out <- data.table(r1, r2)
     return(out)
   }
-  # Apply Entner's rules with 50 random subsets and 20 candidates per subset
-  df <- foreach(bb = seq_len(50), .combine = rbind) %do%
+  # Apply Entner's rules with B random subset-variable pairs
+  df <- foreach(bb = seq_len(B), .combine = rbind) %do%
     entner(bb)
   # Selecting different decision thresholds based on experimentation
+  # Note -- this is very generous!
   if (df[, sum(r1) / .N] > 1/200) {
-    g <- 'xy'
-  } else if (df[, sum(r2) / .N] > 1/4) {
+    g <- 'xy' 
+  } else if (df[, sum(r2) / .N] > 1/5) {
     g <- 'ci'
   } else {
     g <- 'na'
@@ -504,12 +502,13 @@ score_fn <- function(sim_obj) {
 big_loop <- function(sims_df, sim_id, i) {
   # Simulate data, extract ground truth
   sdf <- sims_df[s_id == sim_id]
+  n_reps <- ifelse(sdf$lin_pr == 1, 1000, 500)
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
   # Confounder blanket regression
-  df_b <- cbr_fn(sim_obj, eps = 0.25)
+  df_b <- cbr_fn(sim_obj, gamma = 0.25) # Check this
   # Constraint function
-  df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5)
+  df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
   df_s <- score_fn(sim_obj)
   # Export
