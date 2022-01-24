@@ -42,3 +42,4 @@ vignettes/*.pdf
 .DS_Store
 *.Rproj
 sim_v1.R
+/Myriad
