@@ -505,6 +505,11 @@ score_fn <- function(sim_obj) {
   return(out)
 }
 
+### NOOOOOO!!!!!
+# Replace with GES, and it is allowed to say NA if X - Y have an undirected edge
+# This is wrong b/c of scale invariance?
+
+
 ################################################################################
 
 ### PUT IT ALL TOGETHER ###
@@ -545,12 +550,8 @@ fwrite(res, './results/lin_biv_benchmark.csv')
 # Nonlinear:
 sims$lin_pr <- 1/5
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(50), .combine = rbind) %dopar%
+  foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
 fwrite(res, './results/nl_biv_benchmark.csv')
-
-
-
-
 
 
