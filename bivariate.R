@@ -392,8 +392,11 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
   x <- dat$x
   y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
+  # Take subsets of size equal to expected size of admissible set
   fctr <- d_z + sim_obj$params$d_u
   k <- round(sim_obj$params$sp * fctr)/2
+  # Evaluate R1 10x more frequently than R2
+  r2_idx <- seq_len(B/10)
   # Entner function
   entner <- function(b) {
     # Sample a random subset Z_b and variable W
@@ -408,10 +411,12 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
       pmat1 <- suppressWarnings(pcor(cbind(y, w, z_b, x))$p.value)
       p1.ii <- pmat1[1, 2]
       ### RULE 2 ###
-      pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
-      p2.i <- pmat2[1, 2]
-      pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
-      p2.ii <- pmat3[1, 2]
+      if (b %in% r2_idx) {
+        pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
+        p2.i <- pmat2[1, 2]
+        pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
+        p2.ii <- pmat3[1, 2]
+      }
     } else {
       ### RULE 1 ###
       trn <- sample(n, round(0.8 * n))
@@ -419,10 +424,16 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
       p1.i <- gcm_test(y, w, z_b, trn, tst)
       p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
       ### RULE 2 ###
-      p2.i <- gcm_test(y, x, z_b, trn, tst)
-      p2.ii <- gcm_test(x, w, z_b, trn, tst)
+      if (b %in% r2_idx) {
+        p2.i <- gcm_test(y, x, z_b, trn, tst)
+        p2.ii <- gcm_test(x, w, z_b, trn, tst)
+      } 
     }
     # Apply rules
+    if (!b %in% r2_idx) {
+      p2.i <- 0
+      p2.ii <- 1
+    }
     r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
     r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
     # Export
@@ -434,9 +445,9 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
     entner(bb)
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
-  if (df[, sum(r1) / .N] > 1/200) {
+  if (df[, sum(r1) / .N] >= 1/200) {
     g <- 'xy' 
-  } else if (df[, sum(r2) / .N] > 1/5) {
+  } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
     g <- 'ci'
   } else {
     g <- 'na'
@@ -545,12 +556,12 @@ fwrite(res, './results/lin_biv_benchmark.csv')
 # Nonlinear:
 sims$lin_pr <- 1/5
 res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(50), .combine = rbind) %dopar%
+  foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
 fwrite(res, './results/nl_biv_benchmark.csv')
 
 
-
-
+# Expectation: < 7 hrs to complete
+# Start: 9:15pm
 
 
