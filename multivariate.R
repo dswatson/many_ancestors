@@ -462,6 +462,10 @@ sims <- data.table(
   d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
   sp = 0.5, method = 'er', pref = 1 
 )
+out <- data.table(
+  s_id = NA, idx = NA, amat_cbr = NA, amat_ges = NA, amat = NA
+)
+saveRDS(out, './results/multivariate.rds')
 
 big_loop <- function(sims, sim_id, i) {
   # Simulate data
@@ -474,16 +478,18 @@ big_loop <- function(sims, sim_id, i) {
   # Estimate CPDAG via GES
   amat_ges <- ges_fn(sim_obj)
   # Export results
-  out <- data.table(
+  new <- data.table(
     s_id = sdf$s_id, idx = i, 
     amat_cbr = list(amat_cbr), 
     amat_ges = list(amat_ges),
     amat = list(sim_obj$adj_mat)
   )
-  return(out)
+  old <- readRDS('./results/multivariate.rds')
+  out <- rbind(old, new)
+  saveRDS(out, './results/multivariate.rds')
 }
-res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = 1:20, .combine = rbind) %dopar%
+foreach(ss = sims$s_id) %:%
+  foreach(ii = 1:20) %dopar%
   big_loop(sims, ss, ii)
 
 
