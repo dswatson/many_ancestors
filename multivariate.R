@@ -403,11 +403,14 @@ rfci_fn <- function(sim_obj) {
   rng <- (d_z + 1):(d_z + d_x)
   gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
   gps[rng, ] <- gps[, rng] <- FALSE
-  # RFCI
+  # RFCI (returns PAG)
   rho_list <- list(C = cor(dat), n = n)
+  # This is not the original (skel.method = 'original'), but it's the only one 
+  # that completes in a reasonable amount of time
+  # (~12 mns for d_z = 50, n = 1000)
   rfci_out <- rfci(rho_list, indepTest = gaussCItest, alpha = 0.1, 
                    labels = c(colnames(z), colnames(x)), 
-                   skel.method = 'original',
+                   skel.method = 'stable.fast', numCores = 8,
                    fixedGaps = gps, m.max = k)
   rfci_amat <- rfci_out@amat[rng, rng]
   # Export
@@ -431,7 +434,7 @@ ges_fn <- function(sim_obj) {
   rng <- (d_z + 1):(d_z + d_x)
   gps <- matrix(TRUE, nrow = d_z + d_x, ncol = d_z + d_x)
   gps[rng, ] <- gps[, rng] <- FALSE
-  # GES
+  # GES (returns CPDAG)
   score <- new('GaussL0penObsScore', dat) # BCI
   ges_out <- ges(score, labels = score$getNodes(), maxDegree = k,
                  fixedGaps = gps, phase = c('forward', 'backward'),
@@ -440,8 +443,8 @@ ges_fn <- function(sim_obj) {
   in_edges <- lapply(seq_along(in_edges), function(k) in_edges[[k]] - d_z)
   ges_amat <- matrix(0, nrow = d_x, ncol = d_x,
                      dimnames = list(colnames(x), colnames(x)))
-  for (i in 2:d_x) {
-    for (j in 1:(i - 1)) {
+  for (i in seq_len(d_x)) {
+    for (j in seq_len(d_x)[-i]) {
       if (j %in% in_edges[[i]]) {
         ges_amat[i, j] <- 1
       }
@@ -454,55 +457,57 @@ ges_fn <- function(sim_obj) {
 ################################################################################
 
 ### SIMULATION GRID ###
-# Simulation grid 
 sims <- data.table(
-  s_id = 1:3, n = c(1000, 2000, 4000), 
+  sim_id = 1:5, n = c(500, 1000, 2000, 4000, 8000), 
   d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
-  sp = 0.5, method = 'er', pref = 1, 
+  sp = 0.5, method = 'er', pref = 1 
 )
 
-big_loop <- function(sims, sim_id, i) {
+big_loop <- function(sims, s_id, i) {
   # Simulate data
   sdf <- sims[s_id == sim_id]
-  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
-                 r2 = sdf$r2, lin_pr = sdf$lin_pr, 
-                 sp = sdf$sp, method = sdf$method, pref = sdf$pref)
-  # Estimate adjacency matrix via CBR
+  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, 
+                     sp = sdf$sp, method = sdf$method, pref = sdf$pref)
+  # Estimate ancestor matrix via CBR
   amat_cbr <- cbr_fn(sim_obj)
-  # Estimate adjacency matrix via RFCI
-  amat_rfci <- rfci_fn(sim_obj)
-  # Estimate adjacency matrix via GES
+  # Estimate CPDAG via GES
   amat_ges <- ges_fn(sim_obj)
-  # Note -- these aren't actually adjacency matrices!
   # Export results
   out <- data.table(
-    s_id = sim_id, idx = i, 
+    s_id = sdf$sim_id, idx = i, 
     amat_cbr = list(amat_cbr), 
-    amat_rfci = list(amat_rfci), 
-    amat_ges = list(amat_ges)
+    amat_ges = list(amat_ges),
+    amat = list(sim_obj$adj_mat)
   )
   return(out)
 }
 
-# How long will this take?
-sim_obj <- sim_dat(1000, 100, 6, 0.25, 2/3, 1, 0.5, 'er', 1)
-library(microbenchmark)
-microbenchmark(
-  cbr = cbr_fn(sim_obj), rfci = rfci_fn(sim_obj), ges = ges_fn(sim_obj),
-  times = 1
-)
 
-
+# About 10 minutes to go through all sample sizes.
+# I calculate it should take < 1 hr to do 20 replicates on 8 cores
 
 
 # Compute in parallel
-res <- foreach(ss = sims$s_id, .combine = rbind) %dopar%
-  big_loop(sims, ss, 1)
-res[, hit_rate := sum(yhat) / .N, by = s_id]
-res <- unique(res[, .(s_id, y, hit_rate)])
-res <- merge(res, sims, by = 's_id')
-fwrite(res, lab)
+res <- foreach(ss = sims$sim_id, .combine = rbind) %:%
+  foreach(ii = 1:20, .combine = rbind) %dopar%
+  big_loop(sims, ss, ii)
+saveRDS(res, './results/multivariate.rds')
 
+
+
+library(microbenchmark)
+microbenchmark(
+  foreach(ss = 1:5, .combine = rbind) %do% big_loop(sims, ss, 1), times = 1
+)
+
+# For plot: sample size (x) vs accuracy or error (y)
+# Separate curves for each method, separate plots for different
+# inferences (X -> Y, X - Y, X ~ Y)?
+
+
+# Maybe: parallelize over CBR and GES instances but compute 
+# RFCI in a do loop?
 
 
 
@@ -527,4 +532,31 @@ df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
 df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
 
 
+# Simulation grid 
+sims <- data.table(
+  s_id = 1:3, n = c(1000, 2000, 4000), 
+  d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
+  sp = 0.5, method = 'er', pref = 1 
+)
 
+big_loop <- function(sims, sim_id, i) {
+  # Simulate data
+  sdf <- sims[s_id == sim_id]
+  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
+                 r2 = sdf$r2, lin_pr = sdf$lin_pr, 
+                 sp = sdf$sp, method = sdf$method, pref = sdf$pref)
+  # Estimate ancestor matrix via CBR
+  amat_cbr <- cbr_fn(sim_obj)
+  # Estimate PAG via RFCI
+  amat_rfci <- rfci_fn(sim_obj)
+  # Estimate CPDAG via GES
+  amat_ges <- ges_fn(sim_obj)
+  # Export results
+  out <- data.table(
+    s_id = sim_id, idx = i, 
+    amat_cbr = list(amat_cbr), 
+    amat_rfci = list(amat_rfci), 
+    amat_ges = list(amat_ges)
+  )
+  return(out)
+}
