@@ -12,7 +12,7 @@ library(matrixStats)
 library(glmnet)
 library(tidyverse)
 library(doMC)
-registerDoMC(16)
+registerDoMC(8)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -122,7 +122,7 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
 
 #' @param m Number of nested models to fit.
 #' @param max_d Number of predictors in largest model.
-#' @param decay Exponential decay parameter
+#' @param decay Exponential decay parameter.
 #' @param d_x Dimensionality of X.
 
 # Precompute subset sizes for RFE
@@ -458,12 +458,12 @@ ges_fn <- function(sim_obj) {
 
 ### SIMULATION GRID ###
 sims <- data.table(
-  sim_id = 1:5, n = c(500, 1000, 2000, 4000, 8000), 
+  s_id = 1:5, n = c(500, 1000, 2000, 4000, 8000), 
   d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
   sp = 0.5, method = 'er', pref = 1 
 )
 
-big_loop <- function(sims, s_id, i) {
+big_loop <- function(sims, sim_id, i) {
   # Simulate data
   sdf <- sims[s_id == sim_id]
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
@@ -475,24 +475,18 @@ big_loop <- function(sims, s_id, i) {
   amat_ges <- ges_fn(sim_obj)
   # Export results
   out <- data.table(
-    s_id = sdf$sim_id, idx = i, 
+    s_id = sdf$s_id, idx = i, 
     amat_cbr = list(amat_cbr), 
     amat_ges = list(amat_ges),
     amat = list(sim_obj$adj_mat)
   )
   return(out)
 }
-
-
-# About 10 minutes to go through all sample sizes.
-# I calculate it should take < 1 hr to do 20 replicates on 8 cores
-
-
-# Compute in parallel
-res <- foreach(ss = sims$sim_id, .combine = rbind) %:%
+res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = 1:20, .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
-saveRDS(res, './results/multivariate.rds')
+
+
 
 
 
@@ -504,6 +498,12 @@ microbenchmark(
 # For plot: sample size (x) vs accuracy or error (y)
 # Separate curves for each method, separate plots for different
 # inferences (X -> Y, X - Y, X ~ Y)?
+
+blah <- data.table(
+  s_id = 1, idx = 1, 
+  amat_cbr = list(matrix(rnorm(10*10), ncol = 10)), 
+  amat_ges = list(matrix(rnorm(10*10), ncol = 10)),
+  amat = list(matrix(rnorm(10*10), ncol = 10)))
 
 
 # Maybe: parallelize over CBR and GES instances but compute 
