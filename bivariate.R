@@ -392,8 +392,11 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
   x <- dat$x
   y <- dat$y
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
+  # Take subsets of size equal to expected size of admissible set
   fctr <- d_z + sim_obj$params$d_u
   k <- round(sim_obj$params$sp * fctr)/2
+  # Evaluate R1 10x more frequently than R2
+  r2_idx <- seq_len(B/10)
   # Entner function
   entner <- function(b) {
     # Sample a random subset Z_b and variable W
@@ -408,10 +411,12 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
       pmat1 <- suppressWarnings(pcor(cbind(y, w, z_b, x))$p.value)
       p1.ii <- pmat1[1, 2]
       ### RULE 2 ###
-      pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
-      p2.i <- pmat2[1, 2]
-      pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
-      p2.ii <- pmat3[1, 2]
+      if (b %in% r2_idx) {
+        pmat2 <- suppressWarnings(pcor(cbind(y, x, z_b))$p.value)
+        p2.i <- pmat2[1, 2]
+        pmat3 <- suppressWarnings(pcor(cbind(x, w, z_b))$p.value)
+        p2.ii <- pmat3[1, 2]
+      }
     } else {
       ### RULE 1 ###
       trn <- sample(n, round(0.8 * n))
@@ -419,10 +424,16 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
       p1.i <- gcm_test(y, w, z_b, trn, tst)
       p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
       ### RULE 2 ###
-      p2.i <- gcm_test(y, x, z_b, trn, tst)
-      p2.ii <- gcm_test(x, w, z_b, trn, tst)
+      if (b %in% r2_idx) {
+        p2.i <- gcm_test(y, x, z_b, trn, tst)
+        p2.ii <- gcm_test(x, w, z_b, trn, tst)
+      } 
     }
     # Apply rules
+    if (!b %in% r2_idx) {
+      p2.i <- 0
+      p2.ii <- 1
+    }
     r1 <- ifelse(p1.i <= alpha & p1.ii >= tau, 1, 0)
     r2 <- ifelse(p2.i >= tau | (p2.ii <= alpha & p1.i >= tau), 1, 0)
     # Export
@@ -434,9 +445,9 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
     entner(bb)
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
-  if (df[, sum(r1) / .N] > 1/200) {
+  if (df[, sum(r1) / .N] >= 1/200) {
     g <- 'xy' 
-  } else if (df[, sum(r2) / .N] > 1/5) {
+  } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
     g <- 'ci'
   } else {
     g <- 'na'
@@ -455,59 +466,75 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
 #' @param tst Test index.
 #' @param f Function class.
 
-# MSE-scoring subroutine
-mse_fn <- function(x, y, trn, tst, f) {
+# Model scoring subroutine
+err_fn <- function(x, y, trn, tst, f) {
   # Fit models
   if (f == 'lasso') {
     fit <- cv.glmnet(x[trn, ], y[trn])
     y_hat <- predict(fit, newx = x[tst, ], s = 'lambda.min')
   } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], num.trees = 200, num.threads = 1)
-    y_hat <- predict(fit, data = x[tst, ], num.threads = 1)$predictions
+    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
+                  num.trees = 200, num.threads = 1)
+    vimp <- data.frame('feature' = colnames(x), 
+                       'imp' = fit$variable.importance) %>%
+      arrange(desc(imp))
+    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
+    rf_list <- lapply(seq_along(s), function(k) {
+      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
+      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
+      mse <- tmp_f$prediction.error
+      list('mse' = mse, 'f' = tmp_f)
+    })
+    oob <- sapply(seq_along(rf_list), function(k) rf_list[[k]]$mse)
+    y_hat <- predict(rf_list[[which.min(oob)]]$f, data = x[tst, ], 
+                     num.threads = 1)$predictions
   }
-  # Evaluate errors, export
-  eps <- y_hat - y[tst]
-  mse <- mean(eps^2)
-  return(mse)
+  # Evaluate errors, studentize, export
+  err <- as.numeric(abs(y_hat - y[tst]))
+  return(err / sd(err))
 }
 
 
 #' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param alpha Significance threshold for testing.
 
 # Score function evaluates three different DGPs
-score_fn <- function(sim_obj) {
-  # Get data
+score_fn <- function(sim_obj, alpha) {
+  # Get data, parameters
   dat <- sim_obj$dat
   n <- nrow(dat)
   z <- as.matrix(select(dat, starts_with('z')))
   d_z <- ncol(z)
   x <- dat$x
   y <- dat$y
-  # Some hyperparameters
   linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
+  f <- ifelse(linear, 'lasso', 'rf')
+  # Train/test split
   trn <- sample(n, size = round(0.8 * n))
   tst <- seq_len(n)[-trn]
-  f <- ifelse(linear, 'lasso', 'rf')
   # Score X -> Y
-  mse_xy <- mse_fn(cbind(z, x), y, trn, tst, f)
+  err_xy <- err_fn(cbind(z, x), y, trn, tst, f)
   # Score Y -> X
-  mse_yx <- mse_fn(cbind(z, y), x, trn, tst, f)
+  err_yx <- err_fn(cbind(z, y), x, trn, tst, f)
   # Score X ~ Y
-  mse_x <- mse_fn(z, x, trn, tst, f)
-  mse_y <- mse_fn(z, y, trn, tst, f)
-  # Summarize
-  df <- data.table(
-    mse = c(mse_x + mse_xy, mse_y + mse_yx, mse_x + mse_y),
-    g = c('xy', 'yx', 'ci')
+  err_x <- err_fn(z, x, trn, tst, f)
+  err_y <- err_fn(z, y, trn, tst, f)
+  # Scale by standard deviations
+  m <- data.table(
+    'xy' = err_x + err_xy,
+    'yx' = err_y + err_yx,
+    'ci' = err_x + err_y
   )
+  # Paired, one-sided t-test of best scoring models
+  mu <- colMeans(m)
+  rnk <- rank(mu)
+  p_value <- t.test(m[[which(rnk == 1)]], m[[which(rnk == 2)]], 
+                    paired = TRUE, alt = 'less')$p.value
+  g <- ifelse(p_value <= alpha, names(rnk)[rnk == 1], 'na')
   # Export
-  out <- data.table(method = 'score', g = df[which.min(mse), g])
+  out <- data.table(method = 'score', 'g' = g)
   return(out)
 }
-
-### NOOOOOO!!!!!
-# Replace with GES, and it is allowed to say NA if X - Y have an undirected edge
-# This is wrong b/c of scale invariance?
 
 
 ################################################################################
@@ -526,12 +553,25 @@ big_loop <- function(sims_df, sim_id, i) {
   # Constraint function
   df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
-  df_s <- score_fn(sim_obj)
+  df_s <- score_fn(sim_obj, alpha = 0.05)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
     mutate(s_id = sim_id, idx = i) %>%
     as.data.table(.)
   return(out)
+}
+
+
+big_loop <- function(sims_df, sim_id, i) {
+  # Simulate data, extract ground truth
+  sdf <- sims_df[s_id == sim_id]
+  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
+  df_s <- score_fn(sim_obj, alpha = 0.05)
+  # Export
+  df_s %>% 
+    mutate(s_id = sim_id, idx = i) %>%
+    return(.)
 }
 
 # Execute in parallel
