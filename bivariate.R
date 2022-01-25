@@ -26,20 +26,20 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param sp Sparsity of the connections from background to foreground.
 #' @param r2 Proportion of variance explained by endogenous features.
 #' @param lin_pr Probability that an edge denotes a linear relationship.
-#' @param oracle Expected output of an independence oracle, one of \code{"xy"},
+#' @param g Expected output of an independence oracle, one of \code{"xy"},
 #'   \code{"ci"}, or \code{"na"}.
 #' 
 #' @import data.table
 
 # Data simulation function
-sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
+sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
   # Simulate ancestors
   z <- matrix(rnorm(n * d_z), ncol = d_z)
   var_z <- 1 / d_z # Does this make a difference?
   Sigma <- toeplitz(rho^(0:(d_z - 1))) * var_z
   z <- z %*% chol(Sigma)
   colnames(z) <- paste0('z', seq_len(d_z))
-  # Set weights
+  # Random Rademacher weights
   beta <- gamma <- double(length = d_z)
   k <- round((1 - sp) * d_z)
   beta[sample(d_z, k)] <- sample(c(1, -1), k, replace = TRUE)
@@ -73,7 +73,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   # X data
   x <- signal_x + sim_noise(signal_x, r2)
   # Identifiable?
-  if (oracle == 'na') {
+  if (g == 'na') {
     shared_parents <- which(beta != 0 & gamma != 0)
     u_idx <- sample(shared_parents, size = length(shared_parents)/2)
     z <- z[, -u_idx]
@@ -83,9 +83,9 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
     d_u <- 0
   }
   # Y data
-  if (oracle %in% c('ci', 'na')) {
+  if (g %in% c('ci', 'na')) {
     y <- signal_y + sim_noise(signal_y, r2)
-  } else if (oracle == 'xy') {
+  } else if (g == 'xy') {
     signal_z_to_y <- signal_y
     xzr <- 1 / (k + 1)
     sigma_xy <- sqrt(xzr * var(signal_z_to_y))
@@ -96,7 +96,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, oracle) {
   # Export
   params <- list(
     'n' = n, 'd_z' = d_z, 'd_u' = d_u, 'rho' = rho, 'sp' = sp, 'r2' = r2, 
-    'lin_pr' = lin_pr, 'oracle' = oracle
+    'lin_pr' = lin_pr, 'g' = g
   )
   out <- list(
     'dat' = data.table(z, 'x' = x, 'y' = y),
@@ -345,7 +345,7 @@ cbr_fn <- function(sim_obj, gamma) {
     }
   }
   # Export
-  out <- data.table(method = 'cbr', g = decision) 
+  out <- data.table(method = 'cbr', h = decision) 
   return(out)
 }
 
@@ -446,13 +446,13 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
   if (df[, sum(r1) / .N] >= 1/200) {
-    g <- 'xy' 
+    h <- 'xy' 
   } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
-    g <- 'ci'
+    h <- 'ci'
   } else {
-    g <- 'na'
+    h <- 'na'
   }
-  out <- data.table(method = 'constr', g)
+  out <- data.table(method = 'constr', h)
   return(out)
 }
 
@@ -466,12 +466,13 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
 #' @param tst Test index.
 #' @param f Function class.
 
-# Model scoring subroutine
-err_fn <- function(x, y, trn, tst, f) {
+# Perform feature selection on a training set, return a list with 
+# (i) R^2 and (ii) test residuals
+scr_fn <- function(x, y, trn, tst, f) {
   # Fit models
   if (f == 'lasso') {
     fit <- cv.glmnet(x[trn, ], y[trn])
-    y_hat <- predict(fit, newx = x[tst, ], s = 'lambda.min')
+    y_hat <- as.numeric(predict(fit, newx = x[tst, ], s = 'lambda.min'))
   } else if (f == 'rf') {
     fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
                   num.trees = 200, num.threads = 1)
@@ -482,23 +483,23 @@ err_fn <- function(x, y, trn, tst, f) {
     rf_list <- lapply(seq_along(s), function(k) {
       tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
       tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
-      mse <- tmp_f$prediction.error
-      list('mse' = mse, 'f' = tmp_f)
+      list('mse' = tmp_f$prediction.error, 'f' = tmp_f)
     })
     oob <- sapply(seq_along(rf_list), function(k) rf_list[[k]]$mse)
     y_hat <- predict(rf_list[[which.min(oob)]]$f, data = x[tst, ], 
                      num.threads = 1)$predictions
   }
-  # Evaluate errors, studentize, export
-  err <- as.numeric(abs(y_hat - y[tst]))
-  return(err / sd(err))
+  # Compute residuals, r2
+  eps <- y[tst] - y_hat
+  r2 <- 1 - (sum(eps^2) / sum((y[tst] - mean(y[tst]))^2))
+  return(list('eps' = eps, 'r2' = r2))
 }
 
 
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param alpha Significance threshold for testing.
 
-# Score function evaluates three different DGPs
+# Evaluate graph structures using score-based method
 score_fn <- function(sim_obj, alpha) {
   # Get data, parameters
   dat <- sim_obj$dat
@@ -513,29 +514,31 @@ score_fn <- function(sim_obj, alpha) {
   trn <- sample(n, size = round(0.8 * n))
   tst <- seq_len(n)[-trn]
   # Score X -> Y
-  err_xy <- err_fn(cbind(z, x), y, trn, tst, f)
+  scr_xy <- scr_fn(cbind(z, x), y, trn, tst, f)
   # Score Y -> X
-  err_yx <- err_fn(cbind(z, y), x, trn, tst, f)
+  scr_yx <- scr_fn(cbind(z, y), x, trn, tst, f)
   # Score X ~ Y
-  err_x <- err_fn(z, x, trn, tst, f)
-  err_y <- err_fn(z, y, trn, tst, f)
-  # Scale by standard deviations
-  m <- data.table(
-    'xy' = err_x + err_xy,
-    'yx' = err_y + err_yx,
-    'ci' = err_x + err_y
-  )
-  # Paired, one-sided t-test of best scoring models
-  mu <- colMeans(m)
-  rnk <- rank(mu)
-  p_value <- t.test(m[[which(rnk == 1)]], m[[which(rnk == 2)]], 
-                    paired = TRUE, alt = 'less')$p.value
-  g <- ifelse(p_value <= alpha, names(rnk)[rnk == 1], 'na')
+  scr_x <- scr_fn(z, x, trn, tst, f)
+  scr_y <- scr_fn(z, y, trn, tst, f)
+  # Decision procedure
+  xy_scr <- scr_x$r2 + scr_xy$r2
+  yx_scr <- scr_y$r2 + scr_yx$r2
+  ci_scr <- scr_x$r2 + scr_y$r2
+  if (ci_scr == max(c(xy_scr, yx_scr, ci_scr))) {
+    h <- 'ci'
+  } else {
+    if (xy_scr > yx_scr) {
+      p_value <- cor.test(x[tst], scr_xy$eps)$p.value
+      h <- ifelse(p_value <= alpha, 'na', 'xy')
+    } else {
+      p_value <- cor.test(y[tst], scr_yx$eps)$p.value
+      h <- ifelse(p_value <= alpha, 'na', 'yx')
+    }
+  }
   # Export
-  out <- data.table(method = 'score', 'g' = g)
+  out <- data.table(method = 'score', h)
   return(out)
 }
-
 
 ################################################################################
 
@@ -547,13 +550,13 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   n_reps <- ifelse(sdf$lin_pr == 1, 1000, 500)
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
   # Confounder blanket regression
   df_b <- cbr_fn(sim_obj, gamma = 0.5) 
   # Constraint function
   df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
-  df_s <- score_fn(sim_obj, alpha = 0.05)
+  df_s <- score_fn(sim_obj, alpha = 0.1)
   # Export
   out <- rbind(df_b, df_c, df_s) %>%
     mutate(s_id = sim_id, idx = i) %>%
@@ -561,22 +564,8 @@ big_loop <- function(sims_df, sim_id, i) {
   return(out)
 }
 
-
-big_loop <- function(sims_df, sim_id, i) {
-  # Simulate data, extract ground truth
-  sdf <- sims_df[s_id == sim_id]
-  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, oracle = sdf$oracle)
-  df_s <- score_fn(sim_obj, alpha = 0.05)
-  # Export
-  df_s %>% 
-    mutate(s_id = sim_id, idx = i) %>%
-    return(.)
-}
-
-# Execute in parallel
-sims <- expand.grid(n = c(1000, 2000, 4000),
-                    oracle = c('xy', 'ci', 'na')) %>%
+# Simulation grid
+sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>%
   mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, 
          s_id = row_number()) %>%
   as.data.table(.)
@@ -593,5 +582,10 @@ res <- foreach(ss = sims$s_id, .combine = rbind) %:%
   foreach(ii = seq_len(100), .combine = rbind) %dopar%
   big_loop(sims, ss, ii)
 fwrite(res, './results/nl_biv_benchmark.csv')
+
+
+
+
+
 
 
