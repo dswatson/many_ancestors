@@ -505,15 +505,38 @@ microbenchmark(
 # Separate curves for each method, separate plots for different
 # inferences (X -> Y, X - Y, X ~ Y)?
 
-blah <- data.table(
-  s_id = 1, idx = 1, 
-  amat_cbr = list(matrix(rnorm(10*10), ncol = 10)), 
-  amat_ges = list(matrix(rnorm(10*10), ncol = 10)),
-  amat = list(matrix(rnorm(10*10), ncol = 10)))
-
-
 # Maybe: parallelize over CBR and GES instances but compute 
 # RFCI in a do loop?
+
+
+# Need: one s_id = 3 and two s_id = 5 
+foreach(ii = c(8, 20)) %dopar% 
+  big_loop(sims, 5, ii)
+
+
+
+out <- data.table(s_id = NA, idx = NA, amat_rfci = NA, amat = NA)
+saveRDS(out, './results/rfci_res.rds')
+rfci_loop <- function(sims, sim_id, i) {
+  # Simulate data
+  sdf <- sims[s_id == sim_id]
+  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, 
+                     sp = sdf$sp, method = sdf$method, pref = sdf$pref)
+  # Run RFCI
+  amat_rfci <- rfci_fn(sim_obj)
+  # Export results
+  new <- data.table(
+    s_id = sdf$s_id, idx = i, 
+    amat_rfci = list(amat_rfci), 
+    amat = list(sim_obj$adj_mat)
+  )
+  old <- readRDS('./results/rfci_res.rds')
+  out <- rbind(old, new)
+  saveRDS(out, './results/rfci_res.rds')
+}
+foreach(ss = sims$s_id) %do%
+  rfci_loop(sims, ss, 1)
 
 
 

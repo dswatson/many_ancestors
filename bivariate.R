@@ -29,7 +29,6 @@ set.seed(123, kind = "L'Ecuyer-CMRG")
 #' @param g Expected output of an independence oracle, one of \code{"xy"},
 #'   \code{"ci"}, or \code{"na"}.
 #' 
-#' @import data.table
 
 # Data simulation function
 sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
@@ -112,7 +111,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 #' @param m Number of nested models to fit.
 #' @param max_d Number of predictors in largest model.
 #' @param min_d Number of predictors in smallest model.
-#' @param decay Exponential decay parameter
+#' @param decay Exponential decay parameter.
 
 # Precompute subset sizes for RFE
 subsets <- function(m, max_d, min_d, decay) {
@@ -128,9 +127,6 @@ subsets <- function(m, max_d, min_d, decay) {
 #' @param tst Test indices.
 #' @param f Regression method, either \code{"lasso"} or \code{"rf"}.
 #' 
-#' @import glmnet
-#' @import ranger
-#' @import tidyverse
 
 # Fit regressions, return bit vector for feature selection.
 l0 <- function(x, y, trn, tst, f) {
@@ -174,8 +170,6 @@ l0 <- function(x, y, trn, tst, f) {
 #' @param sim_obj Simulation object output by \code{sim_dat}.
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
-#' @import data.table
-#' @import foreach
 
 # Compute (de)activation rates for X -> Y and Y -> X
 rate_fn <- function(sim_obj, B) {
@@ -241,8 +235,6 @@ rate_fn <- function(sim_obj, B) {
 #' @param res Results object output by \code{rate_fn}.
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
-#' @import data.table
-#' @import foreach
 
 # Compute consistency lower bound
 lb_fn <- function(res, B) {
@@ -280,8 +272,6 @@ lb_fn <- function(res, B) {
 #' @param rule Detect via deactivation (\code{"R1"}) or activation (\code{"R2"})?
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
-#' @import tidyverse
-#' @import data.table
 
 # Infer causal direction using stability selection
 ss_fn <- function(res, lb, order, rule, B) {
@@ -544,11 +534,26 @@ score_fn <- function(sim_obj, alpha) {
 
 ### PUT IT ALL TOGETHER ###
 
+# Initialize
+out <- data.table(
+  method = NA, h = NA, s_id = NA, idx = NA
+)
+saveRDS(out, './results/lin_biv_benchmark.rds')
+saveRDS(out, './results/nl_biv_benchmark.rds')
+
 # Big ol' wrapper
 big_loop <- function(sims_df, sim_id, i) {
-  # Simulate data, extract ground truth
+  # Housekeeping
   sdf <- sims_df[s_id == sim_id]
-  n_reps <- ifelse(sdf$lin_pr == 1, 1000, 500)
+  linear <- ifelse(sdf$lin_pr == 1, TRUE, FALSE)
+  if (linear) {
+    n_reps <- 1000
+    res_file <- './results/lin_biv_benchmark.rds'
+  } else {
+    n_reps <- 500
+    res_file <- './results/nl_biv_benchmark.rds'
+  }
+  # Simulate data
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
   # Confounder blanket regression
@@ -557,11 +562,13 @@ big_loop <- function(sims_df, sim_id, i) {
   df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
   df_s <- score_fn(sim_obj, alpha = 0.1)
-  # Export
-  out <- rbind(df_b, df_c, df_s) %>%
+  # Import, export
+  old <- readRDS(res_file)
+  new <- rbind(df_b, df_c, df_s) %>%
     mutate(s_id = sim_id, idx = i) %>%
     as.data.table(.)
-  return(out)
+  out <- na.omit(rbind(old, new))
+  saveRDS(out, res_file)
 }
 
 # Simulation grid
@@ -570,20 +577,16 @@ sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>%
          s_id = row_number()) %>%
   as.data.table(.)
 
-# Linear:
-res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(100), .combine = rbind) %dopar%
+# Linear
+foreach(ii = seq_len(100)) %:%
+  foreach(ss = sims$s_id) %dopar%
   big_loop(sims, ss, ii)
-fwrite(res, './results/lin_biv_benchmark.csv')
 
-# Nonlinear:
+# Nonlinear
 sims$lin_pr <- 1/5
-res <- foreach(ss = sims$s_id, .combine = rbind) %:%
-  foreach(ii = seq_len(100), .combine = rbind) %dopar%
+foreach(ii = seq_len(100)) %:%
+  foreach(ss = sims$s_id) %dopar%
   big_loop(sims, ss, ii)
-fwrite(res, './results/nl_biv_benchmark.csv')
-
-
 
 
 
