@@ -112,6 +112,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 #' @param max_d Number of predictors in largest model.
 #' @param min_d Number of predictors in smallest model.
 #' @param decay Exponential decay parameter.
+#' 
 
 # Precompute subset sizes for RFE
 subsets <- function(m, max_d, min_d, decay) {
@@ -167,23 +168,21 @@ l0 <- function(x, y, trn, tst, f) {
 }
 
 
-#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param z Matrix of background variables.
+#' @param x Candidate cause.
+#' @param y Candidate effect.
+#' @param linear Are all structural equations linear?
 #' @param B Number of complementary pairs to draw for stability selection.
 #' 
 
 # Compute (de)activation rates for X -> Y and Y -> X
-rate_fn <- function(sim_obj, B) {
-  # Get data
-  dat <- sim_obj$dat
-  n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
+rate_fn <- function(z, x, y, linear, B) {
+  # Preliminaries
+  n <- nrow(z)
   d_z <- ncol(z)
-  x <- dat$x
   zx <- cbind(z, x)
-  y <- dat$y
   zy <- cbind(z, y)
-  # Linear or nonlinear?
-  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
+  f <- ifelse(linear, 'lasso', 'rf')
   # Compute disconnections and (de)activations per subsample
   fit_fn <- function(b) {
     # Take complementary subsets
@@ -310,13 +309,17 @@ ss_fn <- function(res, lb, order, rule, B) {
 }
 
 
-#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param z Matrix of background variables.
+#' @param x Candidate cause.
+#' @param y Candidate effect.
+#' @param linear Are all structural equations linear?
 #' @param gamma Omission threshold.
+#' 
 
 # Wrap it up
-cbr_fn <- function(sim_obj, gamma) {
+cbr_fn <- function(z, x, y, linear, gamma) {
   # Compute rates for each z
-  res <- rate_fn(sim_obj, B = 50)
+  res <- rate_fn(z, x, y, linear, B = 50)
   # Disconnected?
   if (res$disr[1] > gamma) {
     decision <- 'ci'
@@ -335,7 +338,7 @@ cbr_fn <- function(sim_obj, gamma) {
     }
   }
   # Export
-  out <- data.table(method = 'cbr', h = decision) 
+  out <- data.table(method = 'cbr', g_hat = decision) 
   return(out)
 }
 
@@ -348,43 +351,39 @@ cbr_fn <- function(sim_obj, gamma) {
 #' @param z Conditioning set.
 #' @param trn Training index.
 #' @param tst Test index.
+#' 
 
-# GCM subroutine (Shah & Peters 2020). Tests conditional independence of 
+# LOCO subroutine (Lei et al., 2018). Tests conditional independence of 
 # x and y given z using random forest regression.
-gcm_test <- function(x, y, z, trn, tst) {
-  rf1 <- ranger(x = z[trn, ], y = x[trn], num.trees = 50, num.threads = 1)
-  rf2 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
-  eps1 <- x[tst] - predict(rf1, z[tst, ], num.threads = 1)$predictions
-  eps2 <- y[tst] - predict(rf2, z[tst, ], num.threads = 1)$predictions
-  nn <- length(tst)
-  R <- eps1 * eps2
-  R.sq <- R^2
-  meanR <- mean(R)
-  z_score <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
-  p.value <- 2 * pnorm(abs(z_score), lower.tail = FALSE)
-  return(p.value)
+loco_test <- function(x, y, z, trn, tst) {
+  zx <- cbind(z, x)
+  rf0 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
+  rf1 <- ranger(x = zx[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
+  err0 <- abs(y[tst] - predict(rf0, z[tst, ], num.threads = 1)$predictions)
+  err1 <- abs(y[tst] - predict(rf1, zx[tst, ], num.threads = 1)$predictions)
+  delta <- err1 - err0
+  p_value <- wilcox.test(delta, alt = 'greater')$p.value
+  return(p_value)
 }
 
 
-#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param z Matrix of background variables.
+#' @param x Candidate cause.
+#' @param y Candidate effect.
+#' @param linear Are all structural equations linear?
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
 #' @param B Number of random subset-variable pairs for testing.
+#' 
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(sim_obj, alpha, tau, B) {
-  # Get data
-  dat <- sim_obj$dat
-  n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
+constr_fn <- function(z, x, y, linear, alpha, tau, B) {
+  # Preliminaries
+  n <- nrow(z)
   d_z <- ncol(z)
-  x <- dat$x
-  y <- dat$y
-  linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
   # Take subsets of size equal to expected size of admissible set
-  fctr <- d_z + sim_obj$params$d_u
-  k <- round(sim_obj$params$sp * fctr)/2
+  k <- round(sim_obj$params$sp * d_z)/2
   # Evaluate R1 10x more frequently than R2
   r2_idx <- seq_len(B/10)
   # Entner function
@@ -394,7 +393,7 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
     z_b <- z[, z_idx]
     j <- sample(seq_len(d_z)[-z_idx], 1)
     w <- z[, j]
-    if (linear == TRUE) {
+    if (linear) {
       ### RULE 1 ###
       pmat0 <- suppressWarnings(pcor(cbind(y, w, z_b))$p.value)
       p1.i <- pmat0[1, 2]
@@ -411,12 +410,12 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
       ### RULE 1 ###
       trn <- sample(n, round(0.8 * n))
       tst <- seq_len(n)[-trn]
-      p1.i <- gcm_test(y, w, z_b, trn, tst)
-      p1.ii <- gcm_test(y, w, cbind(z_b, x), trn, tst)
+      p1.i <- loco_test(y, w, z_b, trn, tst)
+      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, tst)
       ### RULE 2 ###
       if (b %in% r2_idx) {
-        p2.i <- gcm_test(y, x, z_b, trn, tst)
-        p2.ii <- gcm_test(x, w, z_b, trn, tst)
+        p2.i <- loco_test(y, x, z_b, trn, tst)
+        p2.ii <- loco_test(x, w, z_b, trn, tst)
       } 
     }
     # Apply rules
@@ -436,13 +435,13 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
   if (df[, sum(r1) / .N] >= 1/200) {
-    h <- 'xy' 
+    g_hat <- 'xy' 
   } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
-    h <- 'ci'
+    g_hat <- 'ci'
   } else {
-    h <- 'na'
+    g_hat <- 'na'
   }
-  out <- data.table(method = 'constr', h)
+  out <- data.table(method = 'constr', g_hat)
   return(out)
 }
 
@@ -455,6 +454,7 @@ constr_fn <- function(sim_obj, alpha, tau, B) {
 #' @param trn Training index.
 #' @param tst Test index.
 #' @param f Function class.
+#' 
 
 # Perform feature selection on a training set, return a list with 
 # (i) R^2 and (ii) test residuals
@@ -486,19 +486,18 @@ scr_fn <- function(x, y, trn, tst, f) {
 }
 
 
-#' @param sim_obj Simulation object output by \code{sim_dat}.
+#' @param z Matrix of background variables.
+#' @param x Candidate cause.
+#' @param y Candidate effect.
+#' @param linear Are all structural equations linear?
 #' @param alpha Significance threshold for testing.
+#' 
 
 # Evaluate graph structures using score-based method
-score_fn <- function(sim_obj, alpha) {
-  # Get data, parameters
-  dat <- sim_obj$dat
-  n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
+score_fn <- function(z, x, y, linear, alpha) {
+  # Preliminaries
+  n <- nrow(z)
   d_z <- ncol(z)
-  x <- dat$x
-  y <- dat$y
-  linear <- ifelse(sim_obj$params$lin_pr == 1, TRUE, FALSE)
   f <- ifelse(linear, 'lasso', 'rf')
   # Train/test split
   trn <- sample(n, size = round(0.8 * n))
@@ -515,18 +514,18 @@ score_fn <- function(sim_obj, alpha) {
   yx_scr <- scr_y$r2 + scr_yx$r2
   ci_scr <- scr_x$r2 + scr_y$r2
   if (ci_scr == max(c(xy_scr, yx_scr, ci_scr))) {
-    h <- 'ci'
+    g_hat <- 'ci'
   } else {
     if (xy_scr > yx_scr) {
       p_value <- cor.test(x[tst], scr_xy$eps)$p.value
-      h <- ifelse(p_value <= alpha, 'na', 'xy')
+      g_hat <- ifelse(p_value <= alpha, 'na', 'xy')
     } else {
       p_value <- cor.test(y[tst], scr_yx$eps)$p.value
-      h <- ifelse(p_value <= alpha, 'na', 'yx')
+      g_hat <- ifelse(p_value <= alpha, 'na', 'yx')
     }
   }
   # Export
-  out <- data.table(method = 'score', h)
+  out <- data.table(method = 'score', g_hat)
   return(out)
 }
 
@@ -556,12 +555,17 @@ big_loop <- function(sims_df, sim_id, i) {
   # Simulate data
   sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
                      r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
+  # Extract data
+  dat <- sim_obj$dat
+  z <- as.matrix(select(dat, starts_with('z')))
+  x <- dat$x
+  y <- dat$y
   # Confounder blanket regression
-  df_b <- cbr_fn(sim_obj, gamma = 0.5) 
+  df_b <- cbr_fn(z, x, y, linear, gamma = 0.75) 
   # Constraint function
-  df_c <- constr_fn(sim_obj, alpha = 0.1, tau = 0.5, B = n_reps)
+  df_c <- constr_fn(z, x, y, linear, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
-  df_s <- score_fn(sim_obj, alpha = 0.1)
+  df_s <- score_fn(z, x, y, linear, alpha = 0.1)
   # Import, export
   old <- readRDS(res_file)
   new <- rbind(df_b, df_c, df_s) %>%
@@ -587,8 +591,5 @@ sims$lin_pr <- 1/5
 foreach(ii = seq_len(100)) %:%
   foreach(ss = sims$s_id) %dopar%
   big_loop(sims, ss, ii)
-
-
-
 
 
