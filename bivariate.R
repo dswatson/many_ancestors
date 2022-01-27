@@ -371,6 +371,7 @@ loco_test <- function(x, y, z, trn, tst) {
 #' @param x Candidate cause.
 #' @param y Candidate effect.
 #' @param linear Are all structural equations linear?
+#' @param k Size of expected admissible set.
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
 #' @param B Number of random subset-variable pairs for testing.
@@ -378,12 +379,10 @@ loco_test <- function(x, y, z, trn, tst) {
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(z, x, y, linear, alpha, tau, B) {
+constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
   # Preliminaries
   n <- nrow(z)
   d_z <- ncol(z)
-  # Take subsets of size equal to expected size of admissible set
-  k <- round(sim_obj$params$sp * d_z)/2
   # Evaluate R1 10x more frequently than R2
   r2_idx <- seq_len(B/10)
   # Entner function
@@ -560,10 +559,11 @@ big_loop <- function(sims_df, sim_id, i) {
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   y <- dat$y
+  k <- round(sim_obj$params$sp * d_z)/2
   # Confounder blanket regression
   df_b <- cbr_fn(z, x, y, linear, gamma = 0.75) 
   # Constraint function
-  df_c <- constr_fn(z, x, y, linear, alpha = 0.1, tau = 0.5, B = n_reps)
+  df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
   df_s <- score_fn(z, x, y, linear, alpha = 0.1)
   # Import, export
