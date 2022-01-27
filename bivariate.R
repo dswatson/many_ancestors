@@ -559,7 +559,7 @@ big_loop <- function(sims_df, sim_id, i) {
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   y <- dat$y
-  k <- round(sim_obj$params$sp * d_z)/2
+  k <- round(sdf$sp * sdf$d_z)/2
   # Confounder blanket regression
   df_b <- cbr_fn(z, x, y, linear, gamma = 0.75) 
   # Constraint function
