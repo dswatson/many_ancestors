@@ -534,7 +534,7 @@ score_fn <- function(z, x, y, linear, alpha) {
 
 # Initialize
 out <- data.table(
-  method = NA, h = NA, s_id = NA, idx = NA
+  method = NA, g_hat = NA, s_id = NA, idx = NA
 )
 saveRDS(out, './results/lin_biv_benchmark.rds')
 saveRDS(out, './results/nl_biv_benchmark.rds')
