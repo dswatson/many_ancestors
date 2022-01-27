@@ -78,6 +78,8 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
     z <- z[, -u_idx]
     d_z <- ncol(z)
     d_u <- length(u_idx)
+    beta <- beta[-u_idx]
+    gamma <- gamma[-u_idx]
   } else {
     d_u <- 0
   }
@@ -545,9 +547,11 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   linear <- ifelse(sdf$lin_pr == 1, TRUE, FALSE)
   if (linear) {
+    gamma_f <- 0.5
     n_reps <- 1000
     res_file <- './results/lin_biv_benchmark.rds'
   } else {
+    gamma_f <- 0.75
     n_reps <- 500
     res_file <- './results/nl_biv_benchmark.rds'
   }
@@ -561,7 +565,7 @@ big_loop <- function(sims_df, sim_id, i) {
   y <- dat$y
   k <- round(sdf$sp * sdf$d_z)/2
   # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear, gamma = 0.75) 
+  df_b <- cbr_fn(z, x, y, linear, gamma = gamma_f) 
   # Constraint function
   df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
