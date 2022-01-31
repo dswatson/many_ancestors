@@ -8,6 +8,7 @@ source('shah_ss.R')
 library(data.table)
 library(glmnet)
 library(ranger)
+library(gbm)
 library(ppcor)
 library(tidyverse)
 library(doMC)
@@ -110,61 +111,31 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 
 ### CONFOUNDER BLANKET REGRESSION ###
 
-#' @param m Number of nested models to fit.
-#' @param max_d Number of predictors in largest model.
-#' @param min_d Number of predictors in smallest model.
-#' @param decay Exponential decay parameter.
-#' 
-
-# Precompute subset sizes for RFE
-subsets <- function(m, max_d, min_d, decay) {
-  out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
-  out <- na.omit(unique(out)[seq_len(m)])
-  return(out)
-}
-
 
 #' @param x Design matrix.
 #' @param y Outcome vector.
-#' @param trn Training indices.
-#' @param tst Test indices.
-#' @param f Regression method, either \code{"lasso"} or \code{"rf"}.
+#' @param f Regression method, either \code{"lasso"} or \code{"gbm"}.
 #' 
 
 # Fit regressions, return bit vector for feature selection.
-l0 <- function(x, y, trn, tst, f) {
+l0 <- function(x, y, f) {
+  n <- nrow(x)
   if (f == 'lasso') {
+    trn <- sample(n, round(0.8 * n))
+    tst <- seq_len(n)[-trn]
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
-    betas <- coef(fit, s = fit$lambda)[-1, ]
-  } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
-                  num.trees = 200, num.threads = 1)
-    yhat_f0 <- predict(fit, data = x[tst, ], 
-                       num.trees = 50, num.threads = 1)$predictions
-    vimp <- data.frame('feature' = colnames(x), 
-                       'imp' = fit$variable.importance) %>%
-      arrange(desc(imp))
-    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
-    y_hat <- sapply(seq_along(s), function(k) {
-      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
-      predict(tmp_f, data = x[tst, ], num.threads = 1)$predictions
-    })
-    y_hat <- cbind(y_hat, yhat_f0)
-    beta <- double(length = ncol(x))
-    names(beta) <- colnames(x)
-    betas <- sapply(seq_along(s), function(k) {
-      out <- beta
-      keep <- vimp$feature[seq_len(s[k])]
-      out[keep] <- 1
-      return(out)
-    })
-    betas <- cbind(betas, rep(1, ncol(x)))
-  }
-  epsilon <- y_hat - y[tst]
-  mse <- colMeans(epsilon^2)
-  betas <- betas[, which.min(mse)]
+    eps <- y_hat - y[tst]
+    mse <- colMeans(eps^2)
+    betas <- coef(fit, s = fit$lambda)[-1, which.min(mse)]
+  } else if (f == 'gbm') {
+    d <- data.frame(y = y, x)
+    fit <- gbm(y ~ ., data = d, distribution = 'gaussian', n.trees = 1500, 
+               shrinkage = 0.1, interaction.depth = 1, train.fraction = 0.8, 
+               n.cores = 1)
+    n_tree <- gbm.perf(fit, plot.it = FALSE, method = 'test')
+    betas <- summary(fit, plotit = FALSE, n.trees = n_tree, order = FALSE)$rel.inf
+  } 
   out <- ifelse(betas == 0, 0, 1)
   return(out)
 }
@@ -184,24 +155,22 @@ rate_fn <- function(z, x, y, linear, B) {
   d_z <- ncol(z)
   zx <- cbind(z, x)
   zy <- cbind(z, y)
-  f <- ifelse(linear, 'lasso', 'rf')
+  f <- ifelse(linear, 'lasso', 'gbm')
   # Compute disconnections and (de)activations per subsample
   fit_fn <- function(b) {
     # Take complementary subsets
     i_set <- sample(n, round(0.5 * n))
-    i_trn <- sample(i_set, round(0.8 * length(i_set)))
-    i_tst <- setdiff(i_set, i_trn)
     j_set <- seq_len(n)[-i_set]
-    j_trn <- sample(j_set, round(0.8 * length(j_set)))
-    j_tst <- setdiff(j_set, j_trn)
     # Compute active sets
     s <- data.frame(
-      y0 = c(l0(z, y, i_trn, i_tst, f), NA_real_, 
-             l0(z, y, j_trn, j_tst, f), NA_real_), 
-      y1 = c(l0(zx, y, i_trn, i_tst, f), l0(zx, y, j_trn, j_tst, f)),
-      x0 = c(l0(z, x, i_trn, i_tst, f), NA_real_, 
-             l0(z, x, j_trn, j_tst, f), NA_real_), 
-      x1 = c(l0(zy, x, i_trn, i_tst, f), l0(zy, x, j_trn, j_tst, f))
+      y0 = c(l0(z[i_set, ], y[i_set], f), NA_real_, 
+             l0(z[j_set, ], y[j_set], f), NA_real_), 
+      y1 = c(l0(zx[i_set, ], y[i_set], f), 
+             l0(zx[j_set, ], y[j_set], f)),
+      x0 = c(l0(z[i_set, ], x[i_set], f), NA_real_, 
+             l0(z[j_set, ], x[j_set], f), NA_real_), 
+      x1 = c(l0(zy[i_set, ], x[i_set], f), 
+             l0(zy[j_set, ], x[j_set], f))
     )
     # Record disconnections and (de)activations
     dis_i <- any(c(s$y1[d_z + 1], s$x1[d_z + 1]) == 0)
@@ -595,5 +564,59 @@ sims$lin_pr <- 1/5
 foreach(ii = seq_len(100)) %:%
   foreach(ss = sims$s_id) %dopar%
   big_loop(sims, ss, ii)
+
+
+
+
+
+
+# Initialize
+out <- data.table(
+  method = NA, g_hat = NA, s_id = NA, idx = NA
+)
+res_file <- './results/gbm_benchmark.rds'
+saveRDS(out, res_file)
+
+sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>%
+  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, 
+         s_id = row_number()) %>%
+  filter(g == 'xy') %>%
+  as.data.table(.)
+
+gbm_loop <- function(sims_df, sim_id, i) {
+  # Housekeeping
+  sdf <- sims_df[s_id == sim_id]
+  # Simulate data
+  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
+                     r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
+  # Extract data
+  dat <- sim_obj$dat
+  z <- as.matrix(select(dat, starts_with('z')))
+  x <- dat$x
+  y <- dat$y
+  # Confounder blanket regression
+  df_b <- cbr_fn(z, x, y, linear = FALSE, gamma = 0.5) 
+  # Import, export
+  old <- readRDS(res_file)
+  new <- df_b %>%
+    mutate(s_id = sim_id, idx = i) %>%
+    as.data.table(.)
+  out <- na.omit(rbind(old, new))
+  saveRDS(out, res_file)
+}
+foreach(ii = seq_len(100)) %:%
+  foreach(ss = sims$s_id) %dopar%
+  gbm_loop(sims, ss, ii)
+
+
+
+
+
+
+
+
+
+
+
 
 
