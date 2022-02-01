@@ -331,26 +331,21 @@ cbr_fn <- function(z, x, y, linear, gamma) {
 #' @param y Second vector.
 #' @param z Conditioning set.
 #' @param trn Training index.
-#' @param val Validation index.
 #' @param tst Test index.
 #' @param prms List of model parameters.
 #' 
 
 # LOCO subroutine (Lei et al., 2018). Tests conditional independence of 
 # x and y given z using gradient boosting.
-loco_test <- function(x, y, z, trn, val, tst, prms) {
+loco_test <- function(x, y, z, trn, tst, prms) {
   zx <- cbind(z, x)
   # Reduced model
   d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
-  d0_val <- lgb.Dataset.create.valid(d0_trn, z[val, ], label = y[val])
-  f0 <- lgb.train(params = prms, data = d0_trn, valids = list(val = d0_val), 
-                  nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+  f0 <- lgb.train(params = prms, data = d0_trn, nrounds = 50, verbose = 0)
   err0 <- abs(y[tst] - predict(f0, z[tst, ]))
   # Expanded model
   d1_trn <- lgb.Dataset(zx[trn, ], label = y[trn])
-  d1_val <- lgb.Dataset.create.valid(d0_trn, zx[val, ], label = y[val])
-  f1 <- lgb.train(params = prms, data = d1_trn, valids = list(val = d1_val), 
-                  nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+  f1 <- lgb.train(params = prms, data = d1_trn, nrounds = 50, verbose = 0)
   err1 <- abs(y[tst] - predict(f1, zx[tst, ]))
   # Wilcox test
   delta <- err0 - err1
@@ -406,15 +401,14 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
       }
     } else {
       ### RULE 1 ###
-      trn <- sample(n, round(0.7 * n))
-      val <- sample(setdiff(seq_len(n), trn), round(0.15 * n))
-      tst <- seq_len(n)[-c(trn, val)]
-      p1.i <- loco_test(y, w, z_b, trn, val, tst, prms)
-      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, val, tst, prms)
+      trn <- sample(n, round(0.8 * n))
+      tst <- seq_len(n)[-trn]
+      p1.i <- loco_test(y, w, z_b, trn, tst, prms)
+      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, tst, prms)
       ### RULE 2 ###
       if (b %in% r2_idx) {
-        p2.i <- loco_test(y, x, z_b, trn, val, tst, prms)
-        p2.ii <- loco_test(x, w, z_b, trn, val, tst, prms)
+        p2.i <- loco_test(y, x, z_b, trn, tst, prms)
+        p2.ii <- loco_test(x, w, z_b, trn, tst, prms)
       } 
     }
     # Apply rules
@@ -463,11 +457,10 @@ scr_fn <- function(x, y, trn, val, tst, f, prms) {
   # Fit models
   if (f == 'lasso') {
     fit <- glmnet(x[trn, ], y[trn])
-    y_hat <- predict(fit, newx = x[val, ], s = fit$lambda)
-    eps <- y_hat - y[val]
+    y_val <- predict(fit, newx = x[val, ], s = fit$lambda)
+    eps <- y[val] - y_val
     mse <- colMeans(eps^2)
-    k <- which.min(mse)
-    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda[k])
+    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda[which.min(mse)])
   } else if (f == 'gbm') {
     d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
     d_val <- lgb.Dataset.create.valid(d_trn, x[val, ], label = y[val])
@@ -506,9 +499,9 @@ score_fn <- function(z, x, y, linear, alpha) {
     )
   }
   # Train/validation/test split
-  trn <- sample(n, size = round(0.7 * n))
-  val <- seq_len(n)[-trn]
-  tst <- seq_len(n)[-trn]
+  trn <- sample(n, round(0.7 * n))
+  val <- sample(setdiff(seq_len(n), trn), round(0.15 * n))
+  tst <- seq_len(n)[-c(trn, val)]
   # Score X -> Y
   scr_xy <- scr_fn(cbind(z, x), y, trn, val, tst, f, prms)
   # Score Y -> X
