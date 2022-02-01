@@ -1,3 +1,236 @@
+# Want to test speed and power of GCM VS. LOCO
+# using RF and GBM subroutines
+
+loco_test <- function(x, y, z, trn, val, tst, prms) {
+  zx <- cbind(z, x)
+  # Global params
+
+  # Reduced model
+  d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
+  d0_val <- lgb.Dataset.create.valid(d0_trn, z[val, ], label = y[val])
+  f0 <- lgb.train(params = prms, data = d0_trn, valids = list(val = d0_val), 
+                  nrounds = 500, early_stopping_rounds = 5, verbose = 0)
+  err0 <- abs(y[tst] - predict(f0, z[tst, ]))
+  # Maximal model
+  d1_trn <- lgb.Dataset(zx[trn, ], label = y[trn])
+  d1_val <- lgb.Dataset.create.valid(d0_trn, zx[val, ], label = y[val])
+  f1 <- lgb.train(params = prms, data = d1_trn, valids = list(val = d1_val), 
+                  nrounds = 500, early_stopping_rounds = 5, verbose = 0)
+  err1 <- abs(y[tst] - predict(f1, zx[tst, ]))
+  # Wilcox test
+  delta <- err0 - err1
+  p_value <- wilcox.test(delta, alt = 'greater')$p.value
+  return(p_value)
+}
+
+
+gcm_test <- function(x, y, z, trn, tst, f) {
+  if (f == 'rf') {
+    rf1 <- ranger(x = z[trn, ], y = x[trn], num.trees = 50, num.threads = 1)
+    rf2 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
+    eps1 <- x[tst] - predict(rf1, z[tst, ], num.threads = 1)$predictions
+    eps2 <- y[tst] - predict(rf2, z[tst, ], num.threads = 1)$predictions
+  } else if (f == 'gbm') {
+    # Need validation set for early stopping
+    val <- sample(trn, round(0.1 * length(trn)))
+    trn <- trn[-val]
+    # Global params
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+    # Model 1
+    d1_trn <- lgb.Dataset(z[trn, ], label = y[trn])
+    d1_val <- lgb.Dataset.create.valid(d1_trn, z[val, ], label = y[val])
+    f1 <- lgb.train(params = prms, data = d1_trn, valids = list(val = d1_val), 
+                    nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+    eps1 <- y[tst] - predict(f1, z[tst, ])
+    # Model 2
+    d2_trn <- lgb.Dataset(z[trn, ], label = x[trn])
+    d2_val <- lgb.Dataset.create.valid(d2_trn, z[val, ], label = x[val])
+    f2 <- lgb.train(params = prms, data = d2_trn, valids = list(val = d2_val), 
+                    nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+    eps2 <- y[tst] - predict(f2, z[tst, ])
+  }
+  nn <- length(tst)
+  R <- eps1 * eps2
+  R.sq <- R^2
+  meanR <- mean(R)
+  z_score <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
+  p_value <- 2 * pnorm(abs(z_score), lower.tail = FALSE)
+  return(p_value)
+}
+
+
+# Test speed
+library(microbenchmark)
+loop_fn <- function(n, d_z = 100, method, f) {
+  # Simulate data
+  sim <- sim_dat(n, d_z, rho = 0.25, sp = 0.5, r2 = 2/3, 
+                 lin_pr = 1/5, g = 'xy')
+  dat <- sim$dat
+  z <- as.matrix(select(dat, starts_with('z')))
+  z_b <- z[, sample(d_z, d_z/2)]
+  x <- dat$x
+  y <- dat$y
+  # Test loop
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
+  if (method == 'loco') {
+    out <- loco_test(x, y, z_b, trn, tst, f)
+  } else if (method == 'gcm') {
+    out <- gcm_test(x, y, z_b, trn, tst, f)
+  }
+  return(out)
+}
+
+microbenchmark(
+  loco_rf = loop_fn(1000, 100, 'loco', 'rf'),
+  loco_gb = loop_fn(1000, 100, 'loco', 'gbm'),
+  gcm_rf = loop_fn(1000, 100, 'gcm', 'rf'),
+  gcm_gb = loop_fn(1000, 100, 'gcm', 'gbm'),
+  times = 75
+)
+
+# Result: Boosting much faster than random forest (>2x speedup)
+# GCM very slightly faster than LOCO (~10 milliseconds on avg)
+# Not worth it if one's much more powerful than the other! Let's see...
+
+# LOCO clear winner, but try out different testing subroutines, ya?
+
+loco_test <- function(x, y, z, trn, tst, b) {
+  zx <- cbind(z, x)
+  # Reduced model
+  d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
+  f0 <- lgb.train(params = prms, data = d0_trn, nrounds = b, verbose = 0)
+  err0 <- abs(y[tst] - predict(f0, z[tst, ]))
+  # Maximal model
+  d1_trn <- lgb.Dataset(zx[trn, ], label = y[trn])
+  f1 <- lgb.train(params = prms, data = d1_trn, nrounds = b, verbose = 0)
+  err1 <- abs(y[tst] - predict(f1, zx[tst, ]))
+  # Wilcox test
+  delta <- err0 - err1
+  out <- data.table(
+         't' = t.test(delta, alt = 'greater')$p.value,
+    'wilcox' = wilcox.test(delta, alt = 'greater')$p.value,
+     'binom' = binom.test(x = sum(delta > 0), n = length(delta),
+                         alt = 'greater')$p.value
+  )
+  return(out)
+}
+
+prms <- list(
+  objective = 'regression', max_depth = 1, 
+  bagging.fraction = 0.5, feature_fraction = 0.8, 
+  num_threads = 1, force_col_wise = TRUE
+)
+
+pwr_fn <- function(n, b, d_z = 100, idx) {
+  # Simulate data
+  sim <- sim_dat(n, d_z, rho = 0.25, sp = 0.5, r2 = 2/3, 
+                 lin_pr = 1/5, g = 'ci')
+  dat <- sim$dat
+  z <- as.matrix(select(dat, starts_with('z')))
+  x <- dat$x
+  pa_x <- ifelse(sim$wts$beta != 0, 1, 0)
+  pa_y <- ifelse(sim$wts$gamma != 0, 1, 0)
+  shared_pa <- ifelse(pa_x + pa_y == 2, TRUE, FALSE)
+  z_b <- z[, shared_pa]
+  # Increasing X influence 
+  w <- seq(0, 1, by = 0.05)
+  y <- sapply(seq_along(w), function(k) dat$y + w[k] * x)
+  # Test loop
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
+  out <- foreach(k = seq_along(w), .combine = rbind) %do%
+    loco_test(x, y[, k], z_b, trn, tst, b) %>%
+    mutate(n = n, w = w, b = b, idx = idx)
+  return(out)
+}
+df <- foreach(ii = seq_len(100), .combine = rbind) %:%
+  foreach(nn = c(2500, 5000, 1e4), .combine = rbind) %:%
+  foreach(bb = c(25, 50, 100), .combine = rbind) %dopar%
+  pwr_fn(n = nn, b = bb, idx = ii)
+
+
+tmp <- df %>% 
+  pivot_longer(t:binom, names_to = 'test', values_to = 'p_value') %>%
+  as.data.table(.)
+tmp[, hit_rate := sum(p_value <= 0.05)/.N, by = .(test, b, n, w)]
+tmp <- unique(tmp[, .(test, n, b, w, hit_rate)])
+tmp[, nn := paste('n =', n)]
+tmp[, nn := factor(nn, levels = c('n = 2500', 'n = 5000', 'n = 10000'))]
+tmp[, bb := paste('ntree =', b)]
+tmp[, bb := factor(bb, levels = c('ntree = 100', 'ntree = 200', 
+                                  'ntree = 500', 'ntree = 1000'))]
+ggplot(tmp, aes(w, hit_rate, color = test, group = test)) + 
+  geom_path() + 
+  geom_hline(yintercept = 0.05, linetype = 'dashed', color = 'red') + 
+  scale_color_d3() +
+  theme_bw() + 
+  facet_grid(bb ~ nn)
+
+# Weird NA's on the t-test?
+# t-test is the slight winner but Wilcox is basically equivalent
+# binomial a distant third
+# Interestingly: nothing seems to control type I error at this sample size
+# Do we need larger n?
+
+# Super unexpected: fewer trees is associated with better type I error control
+# and has effectively ZERO impact on statistical power. So the fewer trees
+# the better, basically? So weird!
+
+
+ggplot(df, aes(w, p_value, color = method, group = method)) + 
+  geom_point(size = 0.1, alpha = 0.5) + 
+  geom_smooth(size = 0.5, method = 'loess') + 
+  theme_bw()
+
+df[, hit := ifelse(p_value <= 0.05, 1, 0)]
+df[, hit_rate := sum(hit == 1)/.N, by = .(method, w)]
+tmp <- unique(df[, .(method, w, hit_rate)])
+ggplot(tmp, aes(w, hit_rate, color = method, group = method)) + 
+  geom_point(size = 0.25, alpha = 0.5) + 
+  geom_path(size = 0.5) + 
+  geom_hline(yintercept = 0.05, linetype = 'dashed', color = 'red') + 
+  theme_bw()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # To implement Entner's method with GCM or LOCO test
 eps_fn <- function(trn_x, trn_y, tst_x, tst_y, f) {
@@ -48,10 +281,10 @@ loco_test <- function(x, y, z, f) {
 
 
 gcm_test <- function(x, y, z, trn, tst) {
-  rf1 <- randomForest(z[trn, ], x[trn], ntree = 200)
-  rf2 <- randomForest(z[trn, ], y[trn], ntree = 200)
-  eps1 <- x[tst] - predict(rf1, z[tst, ])
-  eps2 <- y[tst] - predict(rf2, z[tst, ])
+  rf1 <- ranger(x = z[trn, ], y = x[trn], num.trees = 100, num.threads = 1)
+  rf2 <- ranger(x = z[trn, ], y = y[trn], num.trees = 100, num.threads = 1)
+  eps1 <- x[tst] - predict(rf1, z[tst, ], num.threads = 1)$predictions
+  eps2 <- y[tst] - predict(rf2, z[tst, ], num.threads = 1)$predictions
   nn <- length(tst)
   R <- eps1 * eps2
   R.sq <- R^2
