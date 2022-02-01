@@ -108,7 +108,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 
 ################################################################################
 
-### CONFOUNDER BLANKET REGRESSION ###
+### CONFOUNDER BLANKET LEARNER ###
 
 
 #' @param x Design matrix.
@@ -133,7 +133,7 @@ l0 <- function(x, y, f, prms) {
     d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
     d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
     fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
-                     nrounds = 2500, early_stopping_rounds = 10, verbose = 0)
+                     nrounds = 3500, early_stopping_rounds = 10, verbose = 0)
     vimp <- lgb.importance(fit)
     out <- as.numeric(colnames(x) %in% vimp$Feature)
   } 
@@ -298,7 +298,7 @@ ss_fn <- function(res, lb, order, rule, B) {
 #' 
 
 # Wrap it up
-cbr_fn <- function(z, x, y, linear, gamma) {
+cbl_fn <- function(z, x, y, linear, gamma) {
   # Compute rates for each z
   res <- rate_fn(z, x, y, linear, B = 50)
   # Disconnected?
@@ -319,7 +319,7 @@ cbr_fn <- function(z, x, y, linear, gamma) {
     }
   }
   # Export
-  out <- data.table(method = 'cbr', g_hat = decision) 
+  out <- data.table(method = 'cbl', g_hat = decision) 
   return(out)
 }
 
@@ -465,7 +465,7 @@ scr_fn <- function(x, y, trn, val, tst, f, prms) {
     d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
     d_val <- lgb.Dataset.create.valid(d_trn, x[val, ], label = y[val])
     fit <- lgb.train(params = prms, data = d_trn, valids = list(val = d_val), 
-                     nrounds = 2000, early_stopping_rounds = 10, verbose = 0)
+                     nrounds = 3500, early_stopping_rounds = 10, verbose = 0)
     y_hat <- predict(fit, x[tst, ])
   }
   # Compute residuals, r2
@@ -535,34 +535,33 @@ score_fn <- function(z, x, y, linear, alpha) {
 
 # Initialize
 out <- data.table(
-  method = NA, g_hat = NA, s_id = NA, idx = NA
+  method = NA, g_hat = NA, n = NA, g = NA, idx = NA
 )
 saveRDS(out, './results/lin_biv_benchmark.rds')
 saveRDS(out, './results/nl_biv_benchmark.rds')
 
 # Big ol' wrapper
-big_loop <- function(sims_df, sim_id, i) {
-  # Housekeeping
-  sdf <- sims_df[s_id == sim_id]
-  linear <- ifelse(sdf$lin_pr == 1, TRUE, FALSE)
+big_loop <- function(linear, n, g, i) {
   if (linear) {
+    l_pr <- 1
     n_reps <- 1000
     res_file <- './results/lin_biv_benchmark.rds'
   } else {
+    l_pr <- 1/5
     n_reps <- 500
     res_file <- './results/nl_biv_benchmark.rds'
   }
   # Simulate data
-  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
+  sim_obj <- sim_dat(n = n, d_z = 100, rho = 0.25, sp = 0.5, 
+                     r2 = 2/3, lin_pr = l_pr, g = g)
   # Extract data
   dat <- sim_obj$dat
   z <- as.matrix(select(dat, starts_with('z')))
   x <- dat$x
   y <- dat$y
   k <- round(sdf$sp * sdf$d_z)/2
-  # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear, gamma = 0.5) 
+  # Confounder blanket learner
+  df_b <- cbl_fn(z, x, y, linear, gamma = 0.5) 
   # Constraint function
   df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
@@ -570,28 +569,23 @@ big_loop <- function(sims_df, sim_id, i) {
   # Import, export
   old <- readRDS(res_file)
   new <- rbind(df_b, df_c, df_s) %>%
-    mutate(s_id = sim_id, idx = i) %>%
+    mutate('n' = n, 'g' = g, 'idx' = i) %>%
     as.data.table(.)
   out <- na.omit(rbind(old, new))
   saveRDS(out, res_file)
 }
 
-# Simulation grid
-sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>%
-  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, 
-         s_id = row_number()) %>%
-  as.data.table(.)
-
 # Linear
 foreach(ii = seq_len(100)) %:%
-  foreach(ss = sims$s_id) %dopar%
-  big_loop(sims, ss, ii)
+  foreach(nn = c(5000, 1e4, 2e4)) %:%
+  foreach(gg = c('xy', 'ci', 'na')) %dopar%
+  big_loop(linear = TRUE, nn, gg, ii)
 
 # Nonlinear
-sims$lin_pr <- 1/5
 foreach(ii = seq_len(100)) %:%
-  foreach(ss = sims$s_id) %dopar%
-  big_loop(sims, ss, ii)
+  foreach(nn = c(5000, 1e4, 2e4)) %:%
+  foreach(gg = c('xy', 'ci', 'na')) %dopar%
+  big_loop(linear = FALSE, nn, gg, ii)
 
 
 
