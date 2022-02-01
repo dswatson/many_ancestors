@@ -338,7 +338,7 @@ cbl_fn <- function(z, x, y, linear, gamma) {
 # LOCO subroutine (Lei et al., 2018). Tests conditional independence of 
 # x and y given z using gradient boosting.
 loco_test <- function(x, y, z, trn, tst, prms) {
-  zx <- cbind(z, x)
+  zx <- cbind(z, w = x)
   # Reduced model
   d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
   f0 <- lgb.train(params = prms, data = d0_trn, nrounds = 50, verbose = 0)
@@ -403,12 +403,12 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
       ### RULE 1 ###
       trn <- sample(n, round(0.8 * n))
       tst <- seq_len(n)[-trn]
-      p1.i <- loco_test(y, w, z_b, trn, tst, prms)
-      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, tst, prms)
+      p1.i <- loco_test(w, y, z_b, trn, tst, prms)
+      p1.ii <- loco_test(w, y, cbind(z_b, x), trn, tst, prms)
       ### RULE 2 ###
       if (b %in% r2_idx) {
-        p2.i <- loco_test(y, x, z_b, trn, tst, prms)
-        p2.ii <- loco_test(x, w, z_b, trn, tst, prms)
+        p2.i <- loco_test(x, y, z_b, trn, tst, prms)
+        p2.ii <- loco_test(w, x, z_b, trn, tst, prms)
       } 
     }
     # Apply rules
@@ -557,9 +557,10 @@ big_loop <- function(linear, n, g, i) {
   # Extract data
   dat <- sim_obj$dat
   z <- as.matrix(select(dat, starts_with('z')))
+  d_z <- ncol(z)
   x <- dat$x
   y <- dat$y
-  k <- round(sdf$sp * sdf$d_z)/2
+  k <- round(d_z/4)
   # Confounder blanket learner
   df_b <- cbl_fn(z, x, y, linear, gamma = 0.5) 
   # Constraint function
