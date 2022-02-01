@@ -113,10 +113,11 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 #' @param x Design matrix.
 #' @param y Outcome vector.
 #' @param f Regression method, either \code{"lasso"} or \code{"gbm"}.
+#' @param prms List of parameters to use when \code{f = "gbm"}.
 #' 
 
 # Fit regressions, return bit vector for feature selection.
-l0 <- function(x, y, f) {
+l0 <- function(x, y, f, prms) {
   n <- nrow(x)
   trn <- sample(n, round(0.8 * n))
   tst <- seq_len(n)[-trn]
@@ -130,11 +131,6 @@ l0 <- function(x, y, f) {
   } else if (f == 'gbm') {
     d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
     d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
-    prms <- list(
-      objective = 'regression', max_depth = 1, 
-      bagging.fraction = 0.5, feature_fraction = 0.8, 
-      num_threads = 1, force_col_wise = TRUE
-    )
     fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
                      nrounds = 2500, early_stopping_rounds = 10, verbose = 0)
     vimp <- lgb.importance(fit)
@@ -158,7 +154,17 @@ rate_fn <- function(z, x, y, linear, B) {
   d_z <- ncol(z)
   zx <- cbind(z, x)
   zy <- cbind(z, y)
-  f <- ifelse(linear, 'lasso', 'gbm')
+  if (linear) {
+    f <- 'lasso'
+    prms <- NULL
+  } else {
+    f <- 'gbm'
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+  }
   # Compute disconnections and (de)activations per subsample
   fit_fn <- function(b) {
     # Take complementary subsets
@@ -166,14 +172,14 @@ rate_fn <- function(z, x, y, linear, B) {
     j_set <- seq_len(n)[-i_set]
     # Compute active sets
     s <- data.frame(
-      y0 = c(l0(z[i_set, ], y[i_set], f), NA_real_, 
-             l0(z[j_set, ], y[j_set], f), NA_real_), 
-      y1 = c(l0(zx[i_set, ], y[i_set], f), 
-             l0(zx[j_set, ], y[j_set], f)),
-      x0 = c(l0(z[i_set, ], x[i_set], f), NA_real_, 
-             l0(z[j_set, ], x[j_set], f), NA_real_), 
-      x1 = c(l0(zy[i_set, ], x[i_set], f), 
-             l0(zy[j_set, ], x[j_set], f))
+      y0 = c(l0(z[i_set, ], y[i_set], f, prms), NA_real_, 
+             l0(z[j_set, ], y[j_set], f, prms), NA_real_), 
+      y1 = c(l0(zx[i_set, ], y[i_set], f, prms), 
+             l0(zx[j_set, ], y[j_set], f, prms)),
+      x0 = c(l0(z[i_set, ], x[i_set], f, prms), NA_real_, 
+             l0(z[j_set, ], x[j_set], f, prms), NA_real_), 
+      x1 = c(l0(zy[i_set, ], x[i_set], f, prms), 
+             l0(zy[j_set, ], x[j_set], f, prms))
     )
     # Record disconnections and (de)activations
     dis_i <- any(c(s$y1[d_z + 1], s$x1[d_z + 1]) == 0)
