@@ -8,7 +8,7 @@ source('shah_ss.R')
 library(data.table)
 library(glmnet)
 library(ranger)
-library(gbm)
+library(lightgbm)
 library(ppcor)
 library(tidyverse)
 library(doMC)
@@ -120,23 +120,28 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 # Fit regressions, return bit vector for feature selection.
 l0 <- function(x, y, f) {
   n <- nrow(x)
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   if (f == 'lasso') {
-    trn <- sample(n, round(0.8 * n))
-    tst <- seq_len(n)[-trn]
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
     eps <- y_hat - y[tst]
     mse <- colMeans(eps^2)
     betas <- coef(fit, s = fit$lambda)[-1, which.min(mse)]
+    out <- ifelse(betas == 0, 0, 1)
   } else if (f == 'gbm') {
-    d <- data.frame(y = y, x)
-    fit <- gbm(y ~ ., data = d, distribution = 'gaussian', n.trees = 1500, 
-               shrinkage = 0.1, interaction.depth = 1, train.fraction = 0.8, 
-               n.cores = 1)
-    n_tree <- gbm.perf(fit, plot.it = FALSE, method = 'test')
-    betas <- summary(fit, plotit = FALSE, n.trees = n_tree, order = FALSE)$rel.inf
+    d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
+    d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+    fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
+                     nrounds = 2500, early_stopping_rounds = 10, verbose = 0)
+    vimp <- lgb.importance(fit)
+    out <- as.numeric(colnames(x) %in% vimp$Feature)
   } 
-  out <- ifelse(betas == 0, 0, 1)
   return(out)
 }
 
@@ -564,55 +569,6 @@ sims$lin_pr <- 1/5
 foreach(ii = seq_len(100)) %:%
   foreach(ss = sims$s_id) %dopar%
   big_loop(sims, ss, ii)
-
-
-
-
-
-
-# Initialize
-out <- data.table(
-  method = NA, g_hat = NA, s_id = NA, idx = NA
-)
-res_file <- './results/gbm_benchmark.rds'
-saveRDS(out, res_file)
-
-sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>%
-  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, 
-         s_id = row_number()) %>%
-  filter(g == 'xy') %>%
-  as.data.table(.)
-
-gbm_loop <- function(sims_df, sim_id, i) {
-  # Housekeeping
-  sdf <- sims_df[s_id == sim_id]
-  # Simulate data
-  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, rho = sdf$rho, sp = sdf$sp, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, g = sdf$g)
-  # Extract data
-  dat <- sim_obj$dat
-  z <- as.matrix(select(dat, starts_with('z')))
-  x <- dat$x
-  y <- dat$y
-  # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear = FALSE, gamma = 0.5) 
-  # Import, export
-  old <- readRDS(res_file)
-  new <- df_b %>%
-    mutate(s_id = sim_id, idx = i) %>%
-    as.data.table(.)
-  out <- na.omit(rbind(old, new))
-  saveRDS(out, res_file)
-}
-foreach(ii = seq_len(100)) %:%
-  foreach(ss = sims$s_id) %dopar%
-  gbm_loop(sims, ss, ii)
-
-
-
-
-
-
 
 
 
