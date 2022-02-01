@@ -7,7 +7,6 @@ setwd('~/Documents/UCL/many_ancestors')
 source('shah_ss.R')
 library(data.table)
 library(glmnet)
-library(ranger)
 library(lightgbm)
 library(ppcor)
 library(tidyverse)
@@ -115,10 +114,11 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 #' @param x Design matrix.
 #' @param y Outcome vector.
 #' @param f Regression method, either \code{"lasso"} or \code{"gbm"}.
+#' @param prms List of parameters to use when \code{f = "gbm"}.
 #' 
 
 # Fit regressions, return bit vector for feature selection.
-l0 <- function(x, y, f) {
+l0 <- function(x, y, f, prms) {
   n <- nrow(x)
   trn <- sample(n, round(0.8 * n))
   tst <- seq_len(n)[-trn]
@@ -132,11 +132,6 @@ l0 <- function(x, y, f) {
   } else if (f == 'gbm') {
     d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
     d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
-    prms <- list(
-      objective = 'regression', max_depth = 1, 
-      bagging.fraction = 0.5, feature_fraction = 0.8, 
-      num_threads = 1, force_col_wise = TRUE
-    )
     fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
                      nrounds = 2500, early_stopping_rounds = 10, verbose = 0)
     vimp <- lgb.importance(fit)
@@ -160,7 +155,17 @@ rate_fn <- function(z, x, y, linear, B) {
   d_z <- ncol(z)
   zx <- cbind(z, x)
   zy <- cbind(z, y)
-  f <- ifelse(linear, 'lasso', 'gbm')
+  if (linear) {
+    f <- 'lasso'
+    prms <- NULL
+  } else {
+    f <- 'gbm'
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+  }
   # Compute disconnections and (de)activations per subsample
   fit_fn <- function(b) {
     # Take complementary subsets
@@ -168,14 +173,14 @@ rate_fn <- function(z, x, y, linear, B) {
     j_set <- seq_len(n)[-i_set]
     # Compute active sets
     s <- data.frame(
-      y0 = c(l0(z[i_set, ], y[i_set], f), NA_real_, 
-             l0(z[j_set, ], y[j_set], f), NA_real_), 
-      y1 = c(l0(zx[i_set, ], y[i_set], f), 
-             l0(zx[j_set, ], y[j_set], f)),
-      x0 = c(l0(z[i_set, ], x[i_set], f), NA_real_, 
-             l0(z[j_set, ], x[j_set], f), NA_real_), 
-      x1 = c(l0(zy[i_set, ], x[i_set], f), 
-             l0(zy[j_set, ], x[j_set], f))
+      y0 = c(l0(z[i_set, ], y[i_set], f, prms), NA_real_, 
+             l0(z[j_set, ], y[j_set], f, prms), NA_real_), 
+      y1 = c(l0(zx[i_set, ], y[i_set], f, prms), 
+             l0(zx[j_set, ], y[j_set], f, prms)),
+      x0 = c(l0(z[i_set, ], x[i_set], f, prms), NA_real_, 
+             l0(z[j_set, ], x[j_set], f, prms), NA_real_), 
+      x1 = c(l0(zy[i_set, ], x[i_set], f, prms), 
+             l0(zy[j_set, ], x[j_set], f, prms))
     )
     # Record disconnections and (de)activations
     dis_i <- any(c(s$y1[d_z + 1], s$x1[d_z + 1]) == 0)
@@ -326,18 +331,29 @@ cbr_fn <- function(z, x, y, linear, gamma) {
 #' @param y Second vector.
 #' @param z Conditioning set.
 #' @param trn Training index.
+#' @param val Validation index.
 #' @param tst Test index.
+#' @param prms List of model parameters.
 #' 
 
 # LOCO subroutine (Lei et al., 2018). Tests conditional independence of 
-# x and y given z using random forest regression.
-loco_test <- function(x, y, z, trn, tst) {
+# x and y given z using gradient boosting.
+loco_test <- function(x, y, z, trn, val, tst, prms) {
   zx <- cbind(z, x)
-  rf0 <- ranger(x = z[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
-  rf1 <- ranger(x = zx[trn, ], y = y[trn], num.trees = 50, num.threads = 1)
-  err0 <- abs(y[tst] - predict(rf0, z[tst, ], num.threads = 1)$predictions)
-  err1 <- abs(y[tst] - predict(rf1, zx[tst, ], num.threads = 1)$predictions)
-  delta <- err1 - err0
+  # Reduced model
+  d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
+  d0_val <- lgb.Dataset.create.valid(d0_trn, z[val, ], label = y[val])
+  f0 <- lgb.train(params = prms, data = d0_trn, valids = list(val = d0_val), 
+                  nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+  err0 <- abs(y[tst] - predict(f0, z[tst, ]))
+  # Expanded model
+  d1_trn <- lgb.Dataset(zx[trn, ], label = y[trn])
+  d1_val <- lgb.Dataset.create.valid(d0_trn, zx[val, ], label = y[val])
+  f1 <- lgb.train(params = prms, data = d1_trn, valids = list(val = d1_val), 
+                  nrounds = 200, early_stopping_rounds = 5, verbose = 0)
+  err1 <- abs(y[tst] - predict(f1, zx[tst, ]))
+  # Wilcox test
+  delta <- err0 - err1
   p_value <- wilcox.test(delta, alt = 'greater')$p.value
   return(p_value)
 }
@@ -359,6 +375,13 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
   # Preliminaries
   n <- nrow(z)
   d_z <- ncol(z)
+  if (!linear) {
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+  }
   # Evaluate R1 10x more frequently than R2
   r2_idx <- seq_len(B/10)
   # Entner function
@@ -383,14 +406,15 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
       }
     } else {
       ### RULE 1 ###
-      trn <- sample(n, round(0.8 * n))
-      tst <- seq_len(n)[-trn]
-      p1.i <- loco_test(y, w, z_b, trn, tst)
-      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, tst)
+      trn <- sample(n, round(0.7 * n))
+      val <- sample(setdiff(seq_len(n), trn), round(0.15 * n))
+      tst <- seq_len(n)[-c(trn, val)]
+      p1.i <- loco_test(y, w, z_b, trn, val, tst, prms)
+      p1.ii <- loco_test(y, w, cbind(z_b, x), trn, val, tst, prms)
       ### RULE 2 ###
       if (b %in% r2_idx) {
-        p2.i <- loco_test(y, x, z_b, trn, tst)
-        p2.ii <- loco_test(x, w, z_b, trn, tst)
+        p2.i <- loco_test(y, x, z_b, trn, val, tst, prms)
+        p2.ii <- loco_test(x, w, z_b, trn, val, tst, prms)
       } 
     }
     # Apply rules
@@ -427,32 +451,29 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
 #' @param x Design matrix.
 #' @param y Response vector.
 #' @param trn Training index.
+#' @param val Validation index.
 #' @param tst Test index.
 #' @param f Function class.
+#' @param prms List of parameters to use when \code{f = "gbm"}.
 #' 
 
 # Perform feature selection on a training set, return a list with 
 # (i) R^2 and (ii) test residuals
-scr_fn <- function(x, y, trn, tst, f) {
+scr_fn <- function(x, y, trn, val, tst, f, prms) {
   # Fit models
   if (f == 'lasso') {
-    fit <- cv.glmnet(x[trn, ], y[trn])
-    y_hat <- as.numeric(predict(fit, newx = x[tst, ], s = 'lambda.min'))
-  } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
-                  num.trees = 200, num.threads = 1)
-    vimp <- data.frame('feature' = colnames(x), 
-                       'imp' = fit$variable.importance) %>%
-      arrange(desc(imp))
-    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
-    rf_list <- lapply(seq_along(s), function(k) {
-      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
-      list('mse' = tmp_f$prediction.error, 'f' = tmp_f)
-    })
-    oob <- sapply(seq_along(rf_list), function(k) rf_list[[k]]$mse)
-    y_hat <- predict(rf_list[[which.min(oob)]]$f, data = x[tst, ], 
-                     num.threads = 1)$predictions
+    fit <- glmnet(x[trn, ], y[trn])
+    y_hat <- predict(fit, newx = x[val, ], s = fit$lambda)
+    eps <- y_hat - y[val]
+    mse <- colMeans(eps^2)
+    k <- which.min(mse)
+    y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda[k])
+  } else if (f == 'gbm') {
+    d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
+    d_val <- lgb.Dataset.create.valid(d_trn, x[val, ], label = y[val])
+    fit <- lgb.train(params = prms, data = d_trn, valids = list(val = d_val), 
+                     nrounds = 2000, early_stopping_rounds = 10, verbose = 0)
+    y_hat <- predict(fit, x[tst, ])
   }
   # Compute residuals, r2
   eps <- y[tst] - y_hat
@@ -473,17 +494,28 @@ score_fn <- function(z, x, y, linear, alpha) {
   # Preliminaries
   n <- nrow(z)
   d_z <- ncol(z)
-  f <- ifelse(linear, 'lasso', 'rf')
-  # Train/test split
-  trn <- sample(n, size = round(0.8 * n))
+  if (linear) {
+    f <- 'lasso'
+    prms <- NULL
+  } else {
+    f <- 'gbm'
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+  }
+  # Train/validation/test split
+  trn <- sample(n, size = round(0.7 * n))
+  val <- seq_len(n)[-trn]
   tst <- seq_len(n)[-trn]
   # Score X -> Y
-  scr_xy <- scr_fn(cbind(z, x), y, trn, tst, f)
+  scr_xy <- scr_fn(cbind(z, x), y, trn, val, tst, f, prms)
   # Score Y -> X
-  scr_yx <- scr_fn(cbind(z, y), x, trn, tst, f)
+  scr_yx <- scr_fn(cbind(z, y), x, trn, val, tst, f, prms)
   # Score X ~ Y
-  scr_x <- scr_fn(z, x, trn, tst, f)
-  scr_y <- scr_fn(z, y, trn, tst, f)
+  scr_x <- scr_fn(z, x, trn, val, tst, f, prms)
+  scr_y <- scr_fn(z, y, trn, val, tst, f, prms)
   # Decision procedure
   xy_scr <- scr_x$r2 + scr_xy$r2
   yx_scr <- scr_y$r2 + scr_yx$r2
@@ -521,11 +553,9 @@ big_loop <- function(sims_df, sim_id, i) {
   sdf <- sims_df[s_id == sim_id]
   linear <- ifelse(sdf$lin_pr == 1, TRUE, FALSE)
   if (linear) {
-    gamma_f <- 0.5
     n_reps <- 1000
     res_file <- './results/lin_biv_benchmark.rds'
   } else {
-    gamma_f <- 0.75
     n_reps <- 500
     res_file <- './results/nl_biv_benchmark.rds'
   }
@@ -539,7 +569,7 @@ big_loop <- function(sims_df, sim_id, i) {
   y <- dat$y
   k <- round(sdf$sp * sdf$d_z)/2
   # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear, gamma = gamma_f) 
+  df_b <- cbr_fn(z, x, y, linear, gamma = 0.5) 
   # Constraint function
   df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5, B = n_reps)
   # Score function
