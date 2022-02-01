@@ -354,12 +354,16 @@ cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
               if (sum(out$decision) == 1) {
                 if (out[decision == 1, order == 'ji' & rule == 'R1']) {
                   adj1[i, j] <- 1
+                  adj1[j, i] <- 0
                 } else if (out[decision == 1, order == 'ji' & rule == 'R2']) {
                   adj1[i, j] <- 0.5
+                  ajd1[j, i] <- 0
                 } else if (out[decision == 1, order == 'ij' & rule == 'R1']) {
                   adj1[j, i] <- 1
+                  adj1[i, j] <- 0
                 } else if (out[decision == 1, order == 'ij' & rule == 'R2']) {
                   adj1[j, i] <- 0.5
+                  adj1[i, j] <- 0
                 }
               } else if (sum(out$decision == 2)) {
                 if (out[order == 'ji', sum(decision) == 2]) {
@@ -394,10 +398,10 @@ rfci_fn <- function(sim_obj) {
   # Extract data
   dat <- sim_obj$dat
   n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
-  d_z <- ncol(z)
-  x <- as.matrix(select(dat, starts_with('x')))
-  d_x <- ncol(x)
+  d_z <- sim_obj$params$d_z
+  zlabs <- paste0('z', seq_len(d_z))
+  d_x <- sim_obj$params$d_x
+  xlabs <- paste0('x', seq_len(d_x))
   k <- round(sim_obj$params$sp * d_z)
   # Gap matrix ensures we don't compute intra-Z edges
   rng <- (d_z + 1):(d_z + d_x)
@@ -407,9 +411,8 @@ rfci_fn <- function(sim_obj) {
   rho_list <- list(C = cor(dat), n = n)
   # This is not the original (skel.method = 'original'), but it's the only one 
   # that completes in a reasonable amount of time
-  # (~12 mns for d_z = 50, n = 1000)
   rfci_out <- rfci(rho_list, indepTest = gaussCItest, alpha = 0.1, 
-                   labels = c(colnames(z), colnames(x)), 
+                   labels = c(zlabs, xlabs), 
                    skel.method = 'stable.fast', numCores = 8,
                    fixedGaps = gps, m.max = k)
   rfci_amat <- rfci_out@amat[rng, rng]
@@ -425,10 +428,9 @@ ges_fn <- function(sim_obj) {
   # Extract data
   dat <- sim_obj$dat
   n <- nrow(dat)
-  z <- as.matrix(select(dat, starts_with('z')))
-  d_z <- ncol(z)
-  x <- as.matrix(select(dat, starts_with('x')))
-  d_x <- ncol(x)
+  d_z <- sim_obj$params$d_z
+  d_x <- sim_obj$params$d_x
+  xlabs <- paste0('x', seq_len(d_x))
   k <- round(sim_obj$params$sp * d_z)
   # Gap matrix ensures we don't compute intra-Z edges
   rng <- (d_z + 1):(d_z + d_x)
@@ -441,8 +443,7 @@ ges_fn <- function(sim_obj) {
                  iterate = FALSE) # Original Chickering algorithm
   in_edges <- ges_out$essgraph$.in.edges[rng]
   in_edges <- lapply(seq_along(in_edges), function(k) in_edges[[k]] - d_z)
-  ges_amat <- matrix(0, nrow = d_x, ncol = d_x,
-                     dimnames = list(colnames(x), colnames(x)))
+  ges_amat <- matrix(0, nrow = d_x, ncol = d_x, dimnames = list(xlabs, xlabs))
   for (i in seq_len(d_x)) {
     for (j in seq_len(d_x)[-i]) {
       if (j %in% in_edges[[i]]) {
@@ -459,13 +460,13 @@ ges_fn <- function(sim_obj) {
 ### SIMULATION GRID ###
 sims <- data.table(
   s_id = 1:5, n = c(500, 1000, 2000, 4000, 8000), 
-  d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
+  d_z = 50, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
   sp = 0.5, method = 'er', pref = 1 
 )
 out <- data.table(
   s_id = NA, idx = NA, amat_cbr = NA, amat_ges = NA, amat = NA
 )
-saveRDS(out, './results/multivariate.rds')
+saveRDS(out, './results/multivariate2.rds')
 
 big_loop <- function(sims, sim_id, i) {
   # Simulate data
@@ -484,9 +485,9 @@ big_loop <- function(sims, sim_id, i) {
     amat_ges = list(amat_ges),
     amat = list(sim_obj$adj_mat)
   )
-  old <- readRDS('./results/multivariate.rds')
+  old <- readRDS('./results/multivariate2.rds')
   out <- rbind(old, new)
-  saveRDS(out, './results/multivariate.rds')
+  saveRDS(out, './results/multivariate2.rds')
 }
 foreach(ss = sims$s_id) %:%
   foreach(ii = 1:20) %dopar%
@@ -496,27 +497,18 @@ foreach(ss = sims$s_id) %:%
 
 
 
-library(microbenchmark)
-microbenchmark(
-  foreach(ss = 1:5, .combine = rbind) %do% big_loop(sims, ss, 1), times = 1
-)
+
 
 # For plot: sample size (x) vs accuracy or error (y)
 # Separate curves for each method, separate plots for different
 # inferences (X -> Y, X - Y, X ~ Y)?
 
-# Maybe: parallelize over CBR and GES instances but compute 
-# RFCI in a do loop?
 
-
-# Need: one s_id = 3 and two s_id = 5 
-foreach(ii = c(8, 20)) %dopar% 
-  big_loop(sims, 5, ii)
 
 
 
 out <- data.table(s_id = NA, idx = NA, amat_rfci = NA, amat = NA)
-saveRDS(out, './results/rfci_res.rds')
+saveRDS(out, './results/rfci_res2.rds')
 rfci_loop <- function(sims, sim_id, i) {
   # Simulate data
   sdf <- sims[s_id == sim_id]
@@ -531,12 +523,15 @@ rfci_loop <- function(sims, sim_id, i) {
     amat_rfci = list(amat_rfci), 
     amat = list(sim_obj$adj_mat)
   )
-  old <- readRDS('./results/rfci_res.rds')
+  old <- readRDS('./results/rfci_res2.rds')
   out <- rbind(old, new)
-  saveRDS(out, './results/rfci_res.rds')
+  saveRDS(out, './results/rfci_res2.rds')
 }
 foreach(ss = sims$s_id) %do%
   rfci_loop(sims, ss, 1)
+
+
+
 
 
 
@@ -561,31 +556,3 @@ df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
 df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
 
 
-# Simulation grid 
-sims <- data.table(
-  s_id = 1:3, n = c(1000, 2000, 4000), 
-  d_z = 100, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
-  sp = 0.5, method = 'er', pref = 1 
-)
-
-big_loop <- function(sims, sim_id, i) {
-  # Simulate data
-  sdf <- sims[s_id == sim_id]
-  sim <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
-                 r2 = sdf$r2, lin_pr = sdf$lin_pr, 
-                 sp = sdf$sp, method = sdf$method, pref = sdf$pref)
-  # Estimate ancestor matrix via CBR
-  amat_cbr <- cbr_fn(sim_obj)
-  # Estimate PAG via RFCI
-  amat_rfci <- rfci_fn(sim_obj)
-  # Estimate CPDAG via GES
-  amat_ges <- ges_fn(sim_obj)
-  # Export results
-  out <- data.table(
-    s_id = sim_id, idx = i, 
-    amat_cbr = list(amat_cbr), 
-    amat_rfci = list(amat_rfci), 
-    amat_ges = list(amat_ges)
-  )
-  return(out)
-}
