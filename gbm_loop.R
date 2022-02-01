@@ -6,16 +6,13 @@ setwd('~/Documents/UCL/many_ancestors')
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
 library(data.table)
-library(glmnet)
-library(ranger)
 library(gbm)
-library(ppcor)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
-set.seed(123, kind = "L'Ecuyer-CMRG")
+set.seed(999, kind = "L'Ecuyer-CMRG")
 
 ################################################################################
 
@@ -129,8 +126,9 @@ l0 <- function(x, y, f) {
     mse <- colMeans(eps^2)
     betas <- coef(fit, s = fit$lambda)[-1, which.min(mse)]
   } else if (f == 'gbm') {
+    b <- ifelse(n < 5000, 2000, 2500)
     d <- data.frame(y = y, x)
-    fit <- gbm(y ~ ., data = d, distribution = 'gaussian', n.trees = 1500, 
+    fit <- gbm(y ~ ., data = d, distribution = 'gaussian', n.trees = b, 
                shrinkage = 0.1, interaction.depth = 1, train.fraction = 0.8, 
                n.cores = 1)
     n_tree <- gbm.perf(fit, plot.it = FALSE, method = 'test')
