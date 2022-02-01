@@ -6,14 +6,13 @@ setwd('~/Documents/UCL/many_ancestors')
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
 library(data.table)
-library(glmnet)
 library(lightgbm)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
-set.seed(123, kind = "L'Ecuyer-CMRG")
+set.seed(999, kind = "L'Ecuyer-CMRG")
 
 ################################################################################
 
