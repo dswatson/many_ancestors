@@ -7,9 +7,7 @@ setwd('~/Documents/UCL/many_ancestors')
 source('shah_ss.R')
 library(data.table)
 library(glmnet)
-library(ranger)
-library(gbm)
-library(ppcor)
+library(lightgbm)
 library(tidyverse)
 library(doMC)
 registerDoMC(8)
@@ -120,23 +118,28 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 # Fit regressions, return bit vector for feature selection.
 l0 <- function(x, y, f) {
   n <- nrow(x)
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   if (f == 'lasso') {
-    trn <- sample(n, round(0.8 * n))
-    tst <- seq_len(n)[-trn]
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
     eps <- y_hat - y[tst]
     mse <- colMeans(eps^2)
     betas <- coef(fit, s = fit$lambda)[-1, which.min(mse)]
+    out <- ifelse(betas == 0, 0, 1)
   } else if (f == 'gbm') {
-    d <- data.frame(y = y, x)
-    fit <- gbm(y ~ ., data = d, distribution = 'gaussian', n.trees = 1500, 
-               shrinkage = 0.1, interaction.depth = 1, train.fraction = 0.8, 
-               n.cores = 1)
-    n_tree <- gbm.perf(fit, plot.it = FALSE, method = 'test')
-    betas <- summary(fit, plotit = FALSE, n.trees = n_tree, order = FALSE)$rel.inf
+    d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
+    d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+    fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
+                     nrounds = 2500, early_stopping_rounds = 10, verbose = 0)
+    vimp <- lgb.importance(fit)
+    out <- as.numeric(colnames(x) %in% vimp$Feature)
   } 
-  out <- ifelse(betas == 0, 0, 1)
   return(out)
 }
 
@@ -340,7 +343,7 @@ gbm_loop <- function(sims_df, sim_id, i) {
   x <- dat$x
   y <- dat$y
   # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear = FALSE, gamma = 0.25) 
+  df_b <- cbr_fn(z, x, y, linear = FALSE, gamma = 0.5) 
   # Import, export
   old <- readRDS(res_file)
   new <- df_b %>%
