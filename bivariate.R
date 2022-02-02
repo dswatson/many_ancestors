@@ -331,25 +331,33 @@ cbl_fn <- function(z, x, y, linear, gamma) {
 #' @param y Second vector.
 #' @param z Conditioning set.
 #' @param trn Training index.
+#' @param val Validation index.
 #' @param tst Test index.
 #' @param prms List of model parameters.
 #' 
 
-# LOCO subroutine (Lei et al., 2018). Tests conditional independence of 
-# x and y given z using gradient boosting.
-loco_test <- function(x, y, z, trn, tst, prms) {
-  zx <- cbind(z, w = x)
-  # Reduced model
-  d0_trn <- lgb.Dataset(z[trn, ], label = y[trn])
-  f0 <- lgb.train(params = prms, data = d0_trn, nrounds = 50, verbose = 0)
-  err0 <- abs(y[tst] - predict(f0, z[tst, ]))
-  # Expanded model
-  d1_trn <- lgb.Dataset(zx[trn, ], label = y[trn])
-  f1 <- lgb.train(params = prms, data = d1_trn, nrounds = 50, verbose = 0)
-  err1 <- abs(y[tst] - predict(f1, zx[tst, ]))
-  # Wilcox test
-  delta <- err0 - err1
-  p_value <- wilcox.test(delta, alt = 'greater')$p.value
+# Generalized covariance measure (Shah & Peters, 2020). 
+# Tests conditional independence of x and y given z using gradient boosting.
+gcm_test <- function(x, y, z, trn, val, tst, prms) {
+  # Model 1
+  d1_trn <- lgb.Dataset(z[trn, ], label = y[trn])
+  d1_val <- lgb.Dataset.create.valid(d1_trn, z[val, ], label = y[val])
+  f1 <- lgb.train(params = prms, data = d1_trn, valids = list(val = d1_val),
+                  nrounds = 3000, early_stopping_rounds = 10, verbose = 0)
+  eps1 <- y[tst] - predict(f1, z[tst, ])
+  # Model 2
+  d2_trn <- lgb.Dataset(z[trn, ], label = x[trn])
+  d2_val <- lgb.Dataset.create.valid(d2_trn, z[val, ], label = x[val])
+  f2 <- lgb.train(params = prms, data = d2_trn, valids = list(val = d2_val),
+                  nrounds = 3000, early_stopping_rounds = 10, verbose = 0)
+  eps2 <- x[tst] - predict(f2, z[tst, ])
+  # Inference
+  nn <- length(tst)
+  R <- eps1 * eps2
+  R.sq <- R^2
+  meanR <- mean(R)
+  z_score <- sqrt(nn) * meanR / sqrt(mean(R.sq) - meanR^2)
+  p_value <- 2 * pnorm(abs(z_score), lower.tail = FALSE)
   return(p_value)
 }
 
@@ -400,15 +408,17 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
         p2.ii <- pmat3[1, 2]
       }
     } else {
+      # Train/validation/test split
+      trn <- sample(n, round(0.7 * n))
+      val <- sample(setdiff(seq_len(n), trn), round(0.15 * n))
+      tst <- seq_len(n)[-c(trn, val)]
       ### RULE 1 ###
-      trn <- sample(n, round(0.8 * n))
-      tst <- seq_len(n)[-trn]
-      p1.i <- loco_test(w, y, z_b, trn, tst, prms)
-      p1.ii <- loco_test(w, y, cbind(z_b, x), trn, tst, prms)
+      p1.i <- gcm_test(w, y, z_b, trn, val, tst, prms)
+      p1.ii <- gcm_test(w, y, cbind(z_b, x), trn, val, tst, prms)
       ### RULE 2 ###
       if (b %in% r2_idx) {
-        p2.i <- loco_test(x, y, z_b, trn, tst, prms)
-        p2.ii <- loco_test(w, x, z_b, trn, tst, prms)
+        p2.i <- gcm_test(x, y, z_b, trn, val, tst, prms)
+        p2.ii <- gcm_test(w, x, z_b, trn, val, tst, prms)
       } 
     }
     # Apply rules
@@ -427,7 +437,7 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
     entner(bb)
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
-  if (df[, sum(r1) / .N] >= 1/200) {
+  if (df[, sum(r1)] > 0) {
     g_hat <- 'xy' 
   } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
     g_hat <- 'ci'
