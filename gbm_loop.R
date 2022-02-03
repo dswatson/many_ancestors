@@ -296,7 +296,7 @@ ss_fn <- function(res, lb, order, rule, B) {
 #' 
 
 # Wrap it up
-cbr_fn <- function(z, x, y, linear, gamma) {
+cbl_fn <- function(z, x, y, linear, gamma) {
   # Compute rates for each z
   res <- rate_fn(z, x, y, linear, B = 50)
   # Disconnected?
@@ -317,7 +317,7 @@ cbr_fn <- function(z, x, y, linear, gamma) {
     }
   }
   # Export
-  out <- data.table(method = 'cbr', g_hat = decision) 
+  out <- data.table(method = 'cbl', g_hat = decision) 
   return(out)
 }
 
@@ -328,13 +328,13 @@ cbr_fn <- function(z, x, y, linear, gamma) {
 out <- data.table(
   method = NA, g_hat = NA, n = NA, g = NA, idx = NA
 )
-res_file <- './results/gbm_benchmark4.rds'
+res_file <- './results/gbm_benchmark.rds'
 saveRDS(out, res_file)
 
-sims <- expand.grid(n = c(2500, 5000, 1e4), g = c('xy', 'ci', 'na')) %>%
-  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, 
-         s_id = row_number()) %>%
-  as.data.table(.)
+#sims <- expand.grid(n = c(2500, 5000, 1e4), g = c('xy', 'ci', 'na')) %>%
+#  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1/5, 
+#         s_id = row_number()) %>%
+#  as.data.table(.)
 
 gbm_loop <- function(n, g, i) {
   # Simulate data
@@ -346,7 +346,7 @@ gbm_loop <- function(n, g, i) {
   x <- dat$x
   y <- dat$y
   # Confounder blanket regression
-  df_b <- cbr_fn(z, x, y, linear = FALSE, gamma = 0.5) 
+  df_b <- cbl_fn(z, x, y, linear = FALSE, gamma = 0.5) 
   # Import, export
   old <- readRDS(res_file)
   new <- df_b %>%
@@ -355,12 +355,11 @@ gbm_loop <- function(n, g, i) {
   out <- na.omit(rbind(old, new))
   saveRDS(out, res_file)
 }
-foreach(ii = seq_len(20)) %:%
+
+foreach(ii = 1:100) %:% 
   foreach(nn = c(5000, 1e4)) %:%
   foreach(gg = c('xy', 'ci', 'na')) %dopar%
   gbm_loop(nn, gg, ii)
-
-
 
 
 
