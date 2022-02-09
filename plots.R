@@ -13,58 +13,57 @@ library(tidyverse)
 ### Bivariate ###
 
 # Import bivariate results
-df <- fread('./results/lin_biv_benchmark.csv')
+df <- readRDS('./results/lin_biv_benchmark.rds')
 
 # Polish
-sims <- expand.grid(n = c(1000, 2000, 4000), g = c('xy', 'ci', 'na')) %>% 
-  mutate(sp = 0.5, d_z = 100, rho = 0.25, r2 = 2/3, lin_pr = 1, 
-         s_id = row_number()) %>%
-  as.data.table(.)
-df <- merge(df, sims, by = 's_id') 
-orcl <- expand.grid(s_id = 1:9, idx = 1:100) %>%
-  mutate(method = 'oracle') %>%
-  inner_join(sims, by = 's_id') %>%
-  mutate(g_hat = g) %>%
-  select(colnames(df))
-df <- rbind(df, orcl)
-df[, na := sum(g_hat == 'na'), by = .(s_id, method)]
-df[, ci := sum(g_hat == 'ci'), by = .(s_id, method)]
-df[, xy := sum(g_hat == 'xy'), by = .(s_id, method)]
-df[, yx := sum(g_hat == 'yx'), by = .(s_id, method)]
+df[, na := sum(g_hat == 'na'), by = .(n, g, method)]
+df[, ci := sum(g_hat == 'ci'), by = .(n, g, method)]
+df[, xy := sum(g_hat == 'xy'), by = .(n, g, method)]
+df[, yx := sum(g_hat == 'yx'), by = .(n, g, method)]
 df <- df %>%
   select(-g_hat) %>%
   pivot_longer(cols = na:yx, names_to = 'g_hat', values_to = 'prop') %>%
-  select(s_id, n, g, method, g_hat, prop) %>%
+  select(n, g, method, g_hat, prop) %>%
   unique(.) %>%
   mutate(n = factor(paste('n =', n), 
-                    levels = c('n = 1000', 'n = 2000', 'n = 4000')),
+                    #levels = c('n = 2500', 'n = 5000', 'n = 10000')),
+                    levels = c('n = 5000', 'n = 10000', 'n = 20000')),
          g_hat = factor(g_hat, levels = c('xy', 'yx', 'ci', 'na'))) %>%
   as.data.table(.)
 df[g == 'xy', g := '(a)']
 df[g == 'ci', g := '(b)']
 df[g == 'na', g := '(c)']
-df[method == 'cbr', method := 'CBL']
+df[method == 'cbl', method := 'CBL']
 df[method == 'constr', method := 'constraint']
-df[, method := factor(method, 
-                      levels = c('constraint', 'score', 'CBL', 'oracle'))]
+df[, method := factor(method, levels = c('constraint', 'score', 'CBL'))]
 df[, g_hat := recode_factor(g_hat, `xy` = 'X %->% Y', `yx` = 'Y %->% X',
                             `ci` = 'X %~% Y', `na` = 'NA')]
 
 # Plot
-p <- ggplot(filter(df, method != 'oracle'), 
-            aes(method, prop, fill = g_hat)) + 
+p <- ggplot(df, aes(method, prop, fill = g_hat)) + 
   geom_bar(stat = 'identity') + 
   scale_fill_npg(labels = parse_format()) + 
-  labs(x = 'Method', y = 'Percentage', title = 'Linear SCM',
+  labs(x = 'Method', y = 'Percentage', 
+       #title = 'Linear SCM',
+       title = 'Nonlinear SCM',
        fill = 'Estimated\nStructure') + 
   theme_bw() + 
   theme(legend.position = 'bottom') + 
   theme(plot.title = element_text(hjust = 0.5)) + 
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(legend.position = 'none') + 
   facet_grid(g ~ n) 
-ggsave('./plots/biv.pdf', width = 4, height = 6)
+#ggsave('./plots/lin_biv.pdf', width = 5, height = 6)
+ggsave('./plots/nl_biv.pdf', width = 5, height = 6)
   
 p + theme(legend.position = 'none')
+
+p <- ggplot(df, aes(g_hat, prop, fill = g_hat)) + 
+  geom_bar(stat = 'identity') + 
+  scale_fill_npg(labels = parse_format()) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_grid(g ~ n) 
 
 ################################################################################
 
