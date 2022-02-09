@@ -13,7 +13,7 @@ library(glmnet)
 library(lightgbm)
 library(tidyverse)
 library(doMC)
-registerDoMC(8)
+registerDoMC(16)
 
 # Set seed
 set.seed(123, kind = "L'Ecuyer-CMRG")
@@ -239,6 +239,7 @@ cbl_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
   xlabs <- paste0('x', seq_len(d_x))
+  linear <- sim_obj$params$lin_pr == 1
   if (linear) {
     f <- 'lasso'
     prms <- NULL
