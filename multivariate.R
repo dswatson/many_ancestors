@@ -338,7 +338,7 @@ cbl_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
                   adj1[j, i] <- 0
                 } else if (out[decision == 1, order == 'ji' & rule == 'R2']) {
                   adj1[i, j] <- 0.5
-                  ajd1[j, i] <- 0
+                  adj1[j, i] <- 0
                 } else if (out[decision == 1, order == 'ij' & rule == 'R1']) {
                   adj1[j, i] <- 1
                   adj1[i, j] <- 0
@@ -496,10 +496,12 @@ rfci_loop <- function(n, d_z, sp, i) {
   saveRDS(out, './results/multivar_rfci.rds')
 }
 foreach(dd = c(50, 100)) %:%
-  foreach(ss = c(1/4, 3/4)) %do%
-  rfci_loop(n = 500, dd, ss, 1)
-foreach(ss = c(1/4, 3/4)) %do%
-  rfci_loop(n = 1000, d_z = 50, ss)
+  foreach(ss = c(1/4, 3/4)) %:%
+  foreach(ii = 1:5) %do%
+  rfci_loop(n = 500, dd, ss, ii)
+foreach(ss = c(1/4, 3/4)) %:%
+  foreach(ii = 1:5) %do%
+  rfci_loop(n = 1000, d_z = 50, ss, ii)
 
 
 
