@@ -369,16 +369,20 @@ gcm_test <- function(x, y, z, trn, val, tst, prms) {
 #' @param k Size of expected admissible set.
 #' @param alpha Significance threshold for inferring dependence.
 #' @param tau Other threshold for "inferring" independence.
-#' @param B Number of random subset-variable pairs for testing.
 #' 
 
 # Constraint-based: for this comparison, we presume X \preceq Y
 # and assume access to the true data sparsity
-constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
+constr_fn <- function(z, x, y, linear, k, alpha, tau) {
   # Preliminaries
   n <- nrow(z)
   d_z <- ncol(z)
-  if (!linear) {
+  if (linear) {
+    B <- 1000
+    r1_thresh <- 1/200
+  } else {
+    B <- 500
+    r1_thresh <- 0
     prms <- list(
       objective = 'regression', max_depth = 1, 
       bagging.fraction = 0.5, feature_fraction = 0.8, 
@@ -437,7 +441,7 @@ constr_fn <- function(z, x, y, linear, k, alpha, tau, B) {
     entner(bb)
   # Selecting different decision thresholds based on experimentation
   # Note -- this is very generous!
-  if (df[, sum(r1)] > 0) {
+  if (df[, sum(r1)] > r1_thresh) {
     g_hat <- 'xy' 
   } else if (df[seq_len(B/10), sum(r2) / .N] >= 1/5) {
     g_hat <- 'ci'
@@ -554,11 +558,9 @@ saveRDS(out, './results/nl_biv_benchmark.rds')
 big_loop <- function(linear, n, g, i) {
   if (linear) {
     l_pr <- 1
-    n_reps <- 1000
     res_file <- './results/lin_biv_benchmark.rds'
   } else {
     l_pr <- 1/5
-    n_reps <- 500
     res_file <- './results/nl_biv_benchmark.rds'
   }
   # Simulate data
@@ -574,7 +576,7 @@ big_loop <- function(linear, n, g, i) {
   # Confounder blanket learner
   df_b <- cbl_fn(z, x, y, linear, gamma = 0.5) 
   # Constraint function
-  df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5, B = n_reps)
+  df_c <- constr_fn(z, x, y, linear, k, alpha = 0.1, tau = 0.5)
   # Score function
   df_s <- score_fn(z, x, y, linear, alpha = 0.1)
   # Import, export
