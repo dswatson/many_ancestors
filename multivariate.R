@@ -10,6 +10,7 @@ library(pcalg)
 library(RBGL)
 library(matrixStats)
 library(glmnet)
+library(lightgbm)
 library(tidyverse)
 library(doMC)
 registerDoMC(8)
@@ -118,62 +119,35 @@ sim_dat <- function(n, d_z, d_x, rho, r2, lin_pr, sp, method, pref) {
 
 ################################################################################
 
-### CONFOUNDER BLANKET REGRESSION ###
-
-#' @param m Number of nested models to fit.
-#' @param max_d Number of predictors in largest model.
-#' @param decay Exponential decay parameter.
-#' @param d_x Dimensionality of X.
-
-# Precompute subset sizes for RFE
-subsets <- function(m, max_d, decay, d_x) {
-  out <- round(min_d + ((max_d - min_d) / (m + 1)^decay) * seq_len(m + 1)^decay)
-  out <- na.omit(unique(out)[seq_len(m)])
-  return(out)
-}
+### CONFOUNDER BLANKET LEARNER ###
 
 
 #' @param x Design matrix.
 #' @param y Outcome vector.
-#' @param trn Training indices.
-#' @param tst Test indices.
-#' @param f Regression method, either \code{"lasso"} or \code{"rf"}.
+#' @param f Regression method, either \code{"lasso"} or \code{"gbm"}.
+#' @param prms List of parameters to use when \code{f = "gbm"}.
+#' 
 
 # Fit regressions, return bit vector for feature selection.
-l0 <- function(x, y, trn, tst, f) {
+l0 <- function(x, y, f, prms) {
+  n <- nrow(x)
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
   if (f == 'lasso') {
     fit <- glmnet(x[trn, ], y[trn], intercept = FALSE)
     y_hat <- predict(fit, newx = x[tst, ], s = fit$lambda)
-    betas <- coef(fit, s = fit$lambda)[-1, ]
-  } else if (f == 'rf') {
-    fit <- ranger(x = x[trn, ], y = y[trn], importance = 'impurity',
-                  num.trees = 200, num.threads = 1)
-    yhat_f0 <- predict(fit, data = x[tst, ], 
-                       num.trees = 50, num.threads = 1)$predictions
-    vimp <- data.frame('feature' = colnames(x), 
-                       'imp' = fit$variable.importance) %>%
-      arrange(desc(imp))
-    s <- subsets(m = 10, max_d = ncol(x), min_d = 5, decay = 2)
-    y_hat <- sapply(seq_along(s), function(k) {
-      tmp_x <- x[trn, vimp$feature[seq_len(s[k])]]
-      tmp_f <- ranger(x = tmp_x, y = y[trn], num.trees = 50, num.threads = 1)
-      predict(tmp_f, data = x[tst, ], num.threads = 1)$predictions
-    })
-    y_hat <- cbind(y_hat, yhat_f0)
-    beta <- double(length = ncol(x))
-    names(beta) <- colnames(x)
-    betas <- sapply(seq_along(s), function(k) {
-      out <- beta
-      keep <- vimp$feature[seq_len(s[k])]
-      out[keep] <- 1
-      return(out)
-    })
-    betas <- cbind(betas, rep(1, ncol(x)))
-  }
-  epsilon <- y_hat - y[tst]
-  mse <- colMeans(epsilon^2)
-  betas <- betas[, which.min(mse)]
-  out <- ifelse(betas == 0, 0, 1)
+    eps <- y_hat - y[tst]
+    mse <- colMeans(eps^2)
+    betas <- coef(fit, s = fit$lambda)[-1, which.min(mse)]
+    out <- ifelse(betas == 0, 0, 1)
+  } else if (f == 'gbm') {
+    d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
+    d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
+    fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
+                     nrounds = 3500, early_stopping_rounds = 10, verbose = 0)
+    vimp <- lgb.importance(fit)
+    out <- as.numeric(colnames(x) %in% vimp$Feature)
+  } 
   return(out)
 }
 
@@ -255,7 +229,7 @@ ss_fn <- function(df, lb, order, rule, B) {
 #' @param B Number of complementary pairs to draw for stability selection.
 
 # Subdag discovery via confounder blanket regression
-cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
+cbl_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
   ### PRELIMINARIES ###
   # Get data, hyperparameters, train/test split
   dat <- sim_obj$dat
@@ -265,7 +239,17 @@ cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
   x <- as.matrix(select(dat, starts_with('x')))
   d_x <- ncol(x)
   xlabs <- paste0('x', seq_len(d_x))
-  f <- ifelse(sim_obj$params$lin_pr == 1, 'lasso', 'rf')
+  if (linear) {
+    f <- 'lasso'
+    prms <- NULL
+  } else {
+    f <- 'gbm'
+    prms <- list(
+      objective = 'regression', max_depth = 1, 
+      bagging.fraction = 0.5, feature_fraction = 0.8, 
+      num_threads = 1, force_col_wise = TRUE
+    )
+  }
   # Initialize
   adj_list <- list(
     matrix(NA_real_, nrow = d_x, ncol = d_x, 
@@ -288,21 +272,17 @@ cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
       d_zt <- ncol(z_t)
       # Take complementary subsets
       a_set <- sample(n, round(0.5 * n))
-      a_trn <- sample(a_set, round(0.8 * length(a_set)))
-      a_tst <- setdiff(a_set, a_trn)
       b_set <- seq_len(n)[-a_set]
-      b_trn <- sample(b_set, round(0.8 * length(b_set)))
-      b_tst <- setdiff(b_set, b_trn)
       # Fit reduced models
       s0 <- sapply(c(i, j), function(k) {
-        c(l0(z_t, x[, k], a_trn, a_tst, f), 
-          l0(z_t, x[, k], b_trn, b_tst, f))
+        c(l0(z_t[a_set, ], x[a_set, k], f, prms), 
+          l0(z_t[b_set, ], x[b_set, k], f, prms))
       })
       # Fit expanded models
       s1 <- sapply(c(i, j), function(k) {
         not_k <- setdiff(c(i, j), k)
-        c(l0(cbind(z_t, x[, not_k]), x[, k], a_trn, a_tst, f),
-          l0(cbind(z_t, x[, not_k]), x[, k], b_trn, b_tst, f))
+        c(l0(cbind(z_t[a_set, ], x[a_set, not_k]), x[a_set, k], f, prms),
+          l0(cbind(z_t[b_set, ], x[b_set, not_k]), x[b_set, k], f, prms))
       })
       # Record disconnections and (de)activations
       dis_a <- any(s1[d_zt + 1, ] == 0)
@@ -329,14 +309,14 @@ cbr_fn <- function(sim_obj, gamma = 0.5, maxiter = 100, B = 50) {
           preceq_i <- which(adj1[i, ] > 0)
           preceq_j <- which(adj1[j, ] > 0)
           a1 <- intersect(preceq_i, preceq_j) 
-          # Only continue if the set of nondescendants has increased since last 
+          # Only continue if the set of non-descendants has increased since last 
           # iteration (i.e., have we learned anything new?)
           if (iter == 0 | length(a1) > length(a0)) {
             df <- foreach(bb = seq_len(B), .combine = rbind) %do%
               sub_loop(bb, i, j, a1)
             # Compute rates
             df[, disr := sum(dis) / .N]
-            if (df$disr[1] >= gamma) { 
+            if (df$disr[1] > gamma) { 
               adj1[i, j] <- adj1[j, i] <- 0
             } else {
               df[, drji := sum(d_ji) / .N, by = z]
@@ -457,102 +437,78 @@ ges_fn <- function(sim_obj) {
 
 ################################################################################
 
-### SIMULATION GRID ###
-sims <- data.table(
-  s_id = 1:5, n = c(500, 1000, 2000, 4000, 8000), 
-  d_z = 50, d_x = 6, rho = 0.25, r2 = 2/3, lin_pr = 1,
-  sp = 0.5, method = 'er', pref = 1 
-)
+# Initialize simulations
 out <- data.table(
-  s_id = NA, idx = NA, amat_cbr = NA, amat_ges = NA, amat = NA
+  n = NA, d_z = NA, sp = NA, idx = NA, amat_cbl = NA, amat_ges = NA, amat = NA
 )
-saveRDS(out, './results/multivariate2.rds')
+saveRDS(out, './results/multivar.rds')
 
-big_loop <- function(sims, sim_id, i) {
+big_loop <- function(n, d_z, sp, i) {
   # Simulate data
-  sdf <- sims[s_id == sim_id]
-  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, 
-                     sp = sdf$sp, method = sdf$method, pref = sdf$pref)
-  # Estimate ancestor matrix via CBR
-  amat_cbr <- cbr_fn(sim_obj)
+  sim_obj <- sim_dat(n = n, d_z = d_z, d_x = 6, rho = 1/4, 
+                     r2 = 2/3, lin_pr = 1, 
+                     sp = sp, method = 'er', pref = 1)
+  # Estimate ancestor matrix via CBL
+  amat_cbl <- cbl_fn(sim_obj)
   # Estimate CPDAG via GES
   amat_ges <- ges_fn(sim_obj)
   # Export results
   new <- data.table(
-    s_id = sdf$s_id, idx = i, 
-    amat_cbr = list(amat_cbr), 
+    'n' = n, 'd_z' = d_z, 'sp' = sp, 'idx' = i, 
+    amat_cbl = list(amat_cbl), 
     amat_ges = list(amat_ges),
     amat = list(sim_obj$adj_mat)
   )
-  old <- readRDS('./results/multivariate2.rds')
-  out <- rbind(old, new)
-  saveRDS(out, './results/multivariate2.rds')
+  old <- readRDS('./results/multivar.rds')
+  out <- na.omit(rbind(old, new))
+  saveRDS(out, './results/multivar.rds')
 }
-foreach(ss = sims$s_id) %:%
+
+# Compute in parallel
+foreach(nn = c(500, 1000, 2000, 4000, 8000)) %:%
+  foreach(dd = c(50, 100)) %:%
+  foreach(ss = c(1/4, 3/4)) %:%
   foreach(ii = 1:20) %dopar%
-  big_loop(sims, ss, ii)
+  big_loop(nn, dd, ss, ii)
 
 
-
-
-
-
-
-# For plot: sample size (x) vs accuracy or error (y)
-# Separate curves for each method, separate plots for different
-# inferences (X -> Y, X - Y, X ~ Y)?
-
-
-
-
-
-out <- data.table(s_id = NA, idx = NA, amat_rfci = NA, amat = NA)
-saveRDS(out, './results/rfci_res2.rds')
-rfci_loop <- function(sims, sim_id, i) {
+# RFCI loop computed separately
+out <- data.table(
+  n = NA, d_z = NA, sp = NA, idx = NA, amat_rfci = NA, amat = NA
+)
+saveRDS(out, './results/multivar_rfci.rds')
+rfci_loop <- function(n, d_z, sp, i) {
   # Simulate data
-  sdf <- sims[s_id == sim_id]
-  sim_obj <- sim_dat(n = sdf$n, d_z = sdf$d_z, d_x = sdf$d_x, rho = sdf$rho, 
-                     r2 = sdf$r2, lin_pr = sdf$lin_pr, 
-                     sp = sdf$sp, method = sdf$method, pref = sdf$pref)
+  sim_obj <- sim_dat(n = n, d_z = d_z, d_x = 6, rho = 1/4, 
+                     r2 = 2/3, lin_pr = 1, 
+                     sp = sp, method = 'er', pref = 1)
   # Run RFCI
   amat_rfci <- rfci_fn(sim_obj)
   # Export results
   new <- data.table(
-    s_id = sdf$s_id, idx = i, 
+    'n' = n, 'd_z' = d_z, 'sp' = sp, 'idx' = i,
     amat_rfci = list(amat_rfci), 
     amat = list(sim_obj$adj_mat)
   )
-  old <- readRDS('./results/rfci_res2.rds')
-  out <- rbind(old, new)
-  saveRDS(out, './results/rfci_res2.rds')
+  old <- readRDS('./results/multivar_rfci.rds')
+  out <- na.omit(rbind(old, new))
+  saveRDS(out, './results/multivar_rfci.rds')
 }
-foreach(ss = sims$s_id) %do%
-  rfci_loop(sims, ss, 1)
+foreach(dd = c(50, 100)) %:%
+  foreach(ss = c(1/4, 3/4)) %do%
+  rfci_loop(n = 500, dd, ss, 1)
+foreach(ss = c(1/4, 3/4)) %do%
+  rfci_loop(n = 1000, d_z = 50, ss)
 
 
 
 
 
 
-df[, sum(is.na(y_hat)) / .N]
-df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
-df[y == 1, sum(yhat, na.rm = TRUE) / .N] 
 
 
-res[, hit_rate := sum(decision) / .N, by = .(h, order, rule, s_id)]
-res <- unique(res[, .(s_id, h, order, rule, hit_rate)])
-res <- merge(res, sims, by = 's_id')
-fwrite(res, 'nonlinear_sim.csv')
 
-# Evaluate performance
-sim <- sim_dat(n = 2000, d_z = 100, d_x = 10, rho = 0, r2 = 2/3, lin_pr = 1,
-               sp = 0.5, method = 'er', pref = 1)
-ahat <- subdag(sim)
 
-# Sensitivity and specificity
-df <- data.table(y = as.numeric(sim$adj_mat), yhat = as.numeric(ahat))
-df[y == 0, sum(yhat, na.rm = TRUE) / .N]     # False positive rate
-df[y == 1, sum(yhat, na.rm = TRUE) / .N]     # Power
+
 
 
