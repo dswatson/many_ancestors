@@ -91,6 +91,7 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
     xzr <- 1 / (k + 1)
     sigma_xy <- sqrt(xzr * var(signal_z_to_y))
     gamma_x <- sigma_xy / sd(x)
+    gamma <- c(gamma, gamma_x)
     signal_y <- signal_z_to_y + x * gamma_x
     y <- signal_y + sim_noise(signal_y, r2)
   }
@@ -109,7 +110,6 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 ################################################################################
 
 ### CONFOUNDER BLANKET LEARNER ###
-
 
 #' @param x Design matrix.
 #' @param y Outcome vector.
@@ -564,7 +564,7 @@ big_loop <- function(linear, n, g, i) {
     res_file <- './results/nl_biv_benchmark.rds'
   }
   # Simulate data
-  sim_obj <- sim_dat(n = n, d_z = 100, rho = 0.25, sp = 0.5, 
+  sim_obj <- sim_dat(n = n, d_z = 100, rho = 1/4, sp = 1/2, 
                      r2 = 2/3, lin_pr = l_pr, g = g)
   # Extract data
   dat <- sim_obj$dat
@@ -590,7 +590,7 @@ big_loop <- function(linear, n, g, i) {
 
 # Linear
 foreach(ii = seq_len(100)) %:%
-  foreach(nn = c(5000, 1e4, 2e4)) %:%
+  foreach(nn = c(2500, 5000, 1e4)) %:%
   foreach(gg = c('xy', 'ci', 'na')) %dopar%
   big_loop(linear = TRUE, nn, gg, ii)
 
