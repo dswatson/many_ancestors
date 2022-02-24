@@ -40,6 +40,6 @@ vignettes/*.pdf
 
 # Also
 .DS_Store
+.bash_history
 *.Rproj
-sim_v1.R
-/Myriad
+/other
