@@ -500,10 +500,12 @@ rfci_loop <- function(n, d_z, sp, i) {
   saveRDS(out, './res/multivar_rfci.rds')
 }
 foreach(dd = c(50, 100)) %:%
-  foreach(ss = c(1/4, 3/4)) %do%
-  rfci_loop(n = 500, dd, ss, 1)
-foreach(ss = c(1/4, 3/4)) %do%
-  rfci_loop(n = 1000, d_z = 50, ss)
+  foreach(ss = c(1/4, 3/4)) %:%
+  foreach(ii = 1:5) %do%
+  rfci_loop(n = 500, dd, ss, ii)
+foreach(ss = c(1/4, 3/4)) %:%
+  foreach(ii = 1:5) %do%
+  rfci_loop(n = 1000, d_z = 50, ss, ii)
 
 
 
