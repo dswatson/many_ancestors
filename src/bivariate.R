@@ -1,8 +1,5 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
-# Set working directory
-setwd('~/Documents/UCL/many_ancestors')
-
 # Load libraries and Shah's code, register cores
 source('shah_ss.R')
 library(data.table)

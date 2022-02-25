@@ -1,6 +1,3 @@
-# Set working directory
-setwd('~/Documents/UCL/many_ancestors')
-
 # Load libraries
 library(data.table)
 library(scales)
