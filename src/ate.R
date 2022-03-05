@@ -1,7 +1,6 @@
 ### Simulations for subgraph discovery with many ancestors ###
 
-# Load libraries and Shah's code, register cores
-source('shah_ss.R')
+# Load libraries, register cores
 library(data.table)
 library(lightgbm)
 library(tidyverse)
@@ -101,12 +100,39 @@ sim_dat <- function(n, d_z, rho, sp, r2, lin_pr, g) {
 
 ################################################################################
 
+### FIT FUNCTION ###
+
+# Define parameters
+prms <- list(
+  objective = 'regression', max_depth = 1, 
+  bagging.fraction = 0.5, feature_fraction = 0.8, 
+  num_threads = 1, force_col_wise = TRUE
+)
+
+# Use GBM for submodels
+fit_fn <- function(x, y) {
+  n <- nrow(x)
+  if (all(y %in% c(0, 1))) {
+    prms$objective <- 'cross_entropy'
+  }
+  trn <- sample(n, round(0.8 * n))
+  tst <- seq_len(n)[-trn]
+  d_trn <- lgb.Dataset(x[trn, ], label = y[trn])
+  d_tst <- lgb.Dataset.create.valid(d_trn, x[tst, ], label = y[tst])
+  fit <- lgb.train(params = prms, data = d_trn, valids = list(tst = d_tst), 
+                   nrounds = 3500, early_stopping_rounds = 10, verbose = 0)
+  return(fit)
+}
+
+################################################################################
+
 ### ESTIMATE CAUSAL EFFECTS ### 
 
 # Big ol' wrapper
 ate_loop <- function(pve, i) { # or g = 'na'?
   # Simulate data
-  sim_obj <- sim_dat(n = 1e4, d_z = 100, rho = 1/4, sp = 1/2, 
+  n <- 1e4
+  sim_obj <- sim_dat(n, d_z = 100, rho = 1/4, sp = 1/2, 
                      r2 = pve, lin_pr = 1/5, g = 'xy')
   # Extract data
   dat <- sim_obj$dat
@@ -118,9 +144,9 @@ ate_loop <- function(pve, i) { # or g = 'na'?
   trn <- sample(n, round(n * 0.8))
   tst <- seq_len(n)[-trn]
   # Fit models (these will be recycled)
-  f_hat <- fit_fn(z[trn, ], x[trn], f, prms)
-  g_hat <- fit_fn(z[trn, ], y[trn], f, prms)
-  h_hat <- fit_fn(zx[trn, ], y[trn], f, prms)
+  f_hat <- fit_fn(z[trn, ], x[trn])
+  g_hat <- fit_fn(z[trn, ], y[trn])
+  h_hat <- fit_fn(zx[trn, ], y[trn])
   # Prediction vectors
   pi_hat <- predict(f_hat, z[tst, ])
   mu_hat <- predict(g_hat, z[tst, ])
