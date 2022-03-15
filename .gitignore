@@ -42,4 +42,6 @@ vignettes/*.pdf
 .DS_Store
 .bash_history
 *.Rproj
+*.pdf
+*.pptx
 /other
