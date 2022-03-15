@@ -4,6 +4,7 @@
 library(data.table)
 library(lightgbm)
 library(tidyverse)
+library(ggsci)
 library(doMC)
 registerDoMC(16)
 
@@ -163,6 +164,10 @@ ate_loop <- function(pve, i) { # or g = 'na'?
   trgt0 <- -1 / (1 - pi_hat)
   d <- data.frame(pseudo_y = y[tst] - al_hat, trgt)
   delta <- as.numeric(coef(lm(pseudo_y ~ 0 + trgt, data = d)))
+  zx_t <- cbind(z, x = 1)
+  zx_c <- cbind(z, x = 0)
+  y1_hat <- predict(h_hat, zx_t[tst, ])
+  y0_hat <-  predict(h_hat, zx_c[tst, ])
   y1_star <- y1_hat + delta * trgt1
   y0_star <- y0_hat + delta * trgt0
   ate_tmle <- mean(y1_star - y0_star)
@@ -180,12 +185,13 @@ df <- foreach(rr = c(1/3, 1/2, 2/3), .combine = rbind) %:%
 saveRDS(df, './res/ate.rds')
 
 # Polish
+colnames(df)[1] <- 'Estimator'
 df[r2 == 1/3, SNR := 'SNR = 0.5']
 df[r2 == 1/2, SNR := 'SNR = 1']
 df[r2 == 2/3, SNR := 'SNR = 2']
 
 # Plot
-ggplot(tmp, aes(Estimator, ATE, fill = Estimator)) + 
+ggplot(df, aes(Estimator, ATE, fill = Estimator)) + 
   geom_violin(alpha = 0.85) + 
   scale_fill_d3() +
   geom_hline(yintercept = 1, color = 'red', linetype = 'dashed') +
